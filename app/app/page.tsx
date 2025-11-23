@@ -1,103 +1,89 @@
-import Image from "next/image";
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { ArrowRightIcon, ShieldCheckIcon, ZapIcon, LayersIcon } from "lucide-react"
+import { StrategyVisualizer } from "@/components/strategy-visualizer"
 
 export default function Home() {
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+    <div className="relative overflow-hidden">
+      {/* Hero Section */}
+      <section className="container mx-auto px-4 py-24 lg:py-32">
+        <div className="grid items-center gap-16 lg:grid-cols-2">
+          <div className="space-y-8">
+            <div className="inline-flex items-center rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-sm font-medium text-primary">
+              <span className="mr-2 flex size-2 rounded-full bg-primary"></span>
+              Powered by 1inch Aqua
+            </div>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+            <h1 className="text-5xl font-bold tracking-tight text-white sm:text-6xl lg:text-7xl">
+              Get <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-cyan-400">100x</span>{" "}
+              Leverage.
+            </h1>
+
+            <p className="max-w-xl text-lg text-muted-foreground">
+              The privacy-preserving shared liquidity protocol that lets you keep assets in your wallet while
+              participating in 100 strategies at once.
+            </p>
+
+            <div className="flex flex-col gap-4 sm:flex-row">
+              <Link href="/vault">
+                <Button size="lg" className="h-12 w-full gap-2 rounded-full text-base font-semibold sm:w-auto">
+                  Start Earning <ArrowRightIcon className="size-4" />
+                </Button>
+              </Link>
+              <Link href="/swap">
+                <Button
+                  size="lg"
+                  variant="outline"
+                  className="h-12 w-full rounded-full border-white/10 bg-white/5 text-base font-semibold hover:bg-white/10 sm:w-auto"
+                >
+                  Swap Assets
+                </Button>
+              </Link>
+            </div>
+          </div>
+
+          <div className="relative">
+            <div className="absolute -inset-4 rounded-[2rem] bg-gradient-to-r from-primary/20 to-cyan-500/20 opacity-50 blur-3xl" />
+            <StrategyVisualizer />
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </section>
+
+      {/* Features Grid */}
+      <section className="container mx-auto px-4 py-24">
+        <div className="grid gap-8 md:grid-cols-3">
+          <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-white/5 p-8 transition-all hover:border-primary/20 hover:bg-white/10">
+            <div className="mb-4 inline-flex rounded-lg bg-primary/10 p-3 text-primary">
+              <LayersIcon className="size-6" />
+            </div>
+            <h3 className="mb-2 text-xl font-bold text-white">Shared Liquidity</h3>
+            <p className="text-muted-foreground">
+              Your single deposit backs multiple strategies simultaneously using 1inch Aqua's virtual accounting.
+            </p>
+          </div>
+
+          <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-white/5 p-8 transition-all hover:border-primary/20 hover:bg-white/10">
+            <div className="mb-4 inline-flex rounded-lg bg-primary/10 p-3 text-primary">
+              <ShieldCheckIcon className="size-6" />
+            </div>
+            <h3 className="mb-2 text-xl font-bold text-white">Privacy Preserved</h3>
+            <p className="text-muted-foreground">
+              Keep assets in your wallet. No more depositing into public AMMs where your positions are exposed.
+            </p>
+          </div>
+
+          <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-white/5 p-8 transition-all hover:border-primary/20 hover:bg-white/10">
+            <div className="mb-4 inline-flex rounded-lg bg-primary/10 p-3 text-primary">
+              <ZapIcon className="size-6" />
+            </div>
+            <h3 className="mb-2 text-xl font-bold text-white">Capital Efficient</h3>
+            <p className="text-muted-foreground">
+              Maximize your yield with n-x leverage logic. 100 strategies means 100x the earning potential.
+            </p>
+          </div>
+        </div>
+      </section>
     </div>
-  );
+  )
 }

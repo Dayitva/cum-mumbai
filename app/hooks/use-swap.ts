@@ -80,7 +80,7 @@ export function useSwap() {
         functionName: "swapExactIn",
         args: [
           appAddress,
-          strategy,
+          strategy as any,
           zeroForOne,
           amountInWei,
           amountOutMinWei,

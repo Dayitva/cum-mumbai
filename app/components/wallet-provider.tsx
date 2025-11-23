@@ -22,7 +22,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     // Only add WalletConnect if project ID is provided
     if (projectId) {
-      connectors.push(walletConnect({ projectId }))
+      connectors.push(walletConnect({ projectId }) as any)
     }
 
     return createConfig({

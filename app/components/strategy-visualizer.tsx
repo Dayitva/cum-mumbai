@@ -10,7 +10,7 @@ export function StrategyVisualizer() {
         <div className="mb-8 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-white">Strategy Performance</h3>
-            <p className="text-sm text-muted-foreground">Real-time leverage tracking</p>
+            <p className="text-sm text-muted-foreground">Real-time liquidity tracking</p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
             <div className="size-1.5 animate-pulse rounded-full bg-primary" />
@@ -34,7 +34,7 @@ export function StrategyVisualizer() {
               <div className="text-5xl font-bold tracking-tighter text-white drop-shadow-[0_0_15px_rgba(var(--primary),0.5)]">
                 100x
               </div>
-              <div className="text-sm font-medium uppercase tracking-widest text-primary">Leverage</div>
+              <div className="text-sm font-medium uppercase tracking-widest text-primary">Liquidity</div>
             </div>
           </div>
         </div>

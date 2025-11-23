@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -9,9 +9,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { STABLECOINS, type Stablecoin } from "@/lib/constants"
 import { useToast } from "@/hooks/use-toast"
 import { useTokenBalance } from "@/hooks/use-token-balance"
+import { useSwap, type SwapStrategy } from "@/hooks/use-swap"
 import { useAccount } from "wagmi"
-import { formatUnits } from "viem"
+import { formatUnits, type Address, keccak256, encodeAbiParameters, parseAbiParameters } from "viem"
 import { ArrowDownUpIcon, ZapIcon } from "lucide-react"
+
+// Default strategy parameters - these should ideally be fetched or provided by the user
+// For now, using reasonable defaults
+const DEFAULT_MAKER = "0x1401840C106f6a9bc64Fd3507aBBa5272261088c" as Address
+const DEFAULT_FEE_BPS = BigInt(30) // 0.3% fee (30 basis points)
+const DEFAULT_SALT = "0x0000000000000000000000000000000000000000000000000000000000000001" as const
 
 export function SwapCard() {
   const [fromToken, setFromToken] = useState<Stablecoin>(STABLECOINS[0])
@@ -22,9 +29,33 @@ export function SwapCard() {
   const { address, isConnected } = useAccount()
   const { balance: fromBalance, formatted: fromFormatted, isLoading: fromLoading, error: fromError, switchToBase: switchToBaseFrom } = useTokenBalance(fromToken)
   const { balance: toBalance, formatted: toFormatted, isLoading: toLoading, error: toError, switchToBase: switchToBaseTo } = useTokenBalance(toToken)
+  const { swapExactIn, isPending: isSwapPending, isSuccess: isSwapSuccess, error: swapError, hash: swapHash } = useSwap()
   
   const networkError = fromError?.message === "Please switch to Base network" || toError?.message === "Please switch to Base network"
   const switchToBase = switchToBaseFrom || switchToBaseTo
+
+  // Handle swap success
+  useEffect(() => {
+    if (isSwapSuccess && swapHash) {
+      toast({
+        title: "Swap Successful",
+        description: `Successfully swapped ${fromAmount} ${fromToken.symbol} for ${toAmount} ${toToken.symbol}`,
+      })
+      setFromAmount("")
+      setToAmount("")
+    }
+  }, [isSwapSuccess, swapHash, fromAmount, toAmount, fromToken, toToken, toast])
+
+  // Handle swap errors
+  useEffect(() => {
+    if (swapError) {
+      toast({
+        title: "Swap Failed",
+        description: swapError.message || "Swap failed. Please try again.",
+        variant: "destructive",
+      })
+    }
+  }, [swapError, toast])
 
   const handleSwapDirection = () => {
     const temp = fromToken
@@ -34,7 +65,16 @@ export function SwapCard() {
     setToAmount(fromAmount)
   }
 
-  const handleSwap = () => {
+  const handleSwap = async () => {
+    if (!isConnected || !address) {
+      toast({
+        title: "Wallet Not Connected",
+        description: "Please connect your wallet to swap",
+        variant: "destructive",
+      })
+      return
+    }
+
     if (!fromAmount || Number.parseFloat(fromAmount) <= 0) {
       toast({
         title: "Invalid Amount",
@@ -44,12 +84,61 @@ export function SwapCard() {
       return
     }
 
-    toast({
-      title: "Swap Initiated",
-      description: `Swapping ${fromAmount || "0"} ${fromToken.symbol} for ${toAmount && !isNaN(Number.parseFloat(toAmount)) ? toAmount : "0"} ${toToken.symbol}...`,
-    })
-    setFromAmount("")
-    setToAmount("")
+    if (!fromBalance || Number.parseFloat(formatUnits(fromBalance, fromToken.decimals)) < Number.parseFloat(fromAmount)) {
+      toast({
+        title: "Insufficient Balance",
+        description: `You don't have enough ${fromToken.symbol} to swap`,
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      // Create strategy - token0 and token1 are ordered by address
+      const token0 = fromToken.address.toLowerCase() < toToken.address.toLowerCase() 
+        ? fromToken.address as Address 
+        : toToken.address as Address
+      const token1 = fromToken.address.toLowerCase() < toToken.address.toLowerCase() 
+        ? toToken.address as Address 
+        : fromToken.address as Address
+
+      const strategy: SwapStrategy = {
+        maker: DEFAULT_MAKER,
+        token0: "0x6930aC79B79a778Bc59f81F83fa087Ff27553B99",
+        token1: "0xE7d17BE1783079FD5A420165CdEdcBCCE2972251",
+        feeBps: DEFAULT_FEE_BPS,
+        salt: DEFAULT_SALT,
+      }
+
+      // Calculate minimum output with 0.5% slippage tolerance
+      const expectedOut = Number.parseFloat(toAmount || "0")
+      const amountOutMin = (expectedOut * 0.995).toFixed(6)
+
+      // Use the swap contract address as the app address for now
+      // This might need to be adjusted based on actual deployment
+      const appAddress = "0xaa18a96e328385ea3c1aacda510d34e20c67932b" as Address
+
+      toast({
+        title: "Swap Pending",
+        description: "Please confirm the transaction in your wallet...",
+      })
+
+      await swapExactIn(
+        appAddress,
+        strategy,
+        fromToken,
+        toToken,
+        fromAmount,
+        amountOutMin,
+        address
+      )
+    } catch (err: any) {
+      toast({
+        title: "Swap Failed",
+        description: err?.message || "Failed to execute swap. Please try again.",
+        variant: "destructive",
+      })
+    }
   }
 
   // Simulate exchange rate calculation
@@ -221,11 +310,12 @@ export function SwapCard() {
 
         <Button
           onClick={handleSwap}
-          className="h-12 w-full bg-primary text-lg font-semibold text-black hover:bg-primary/90"
+          disabled={!isConnected || !fromAmount || Number.parseFloat(fromAmount) <= 0 || isSwapPending || (fromBalance !== undefined && fromBalance !== null && Number.parseFloat(formatUnits(fromBalance, fromToken.decimals)) < Number.parseFloat(fromAmount))}
+          className="h-12 w-full bg-primary text-lg font-semibold text-black hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           size="lg"
         >
           <ArrowDownUpIcon className="mr-2 size-5" />
-          Execute Swap
+          {isSwapPending ? "Swapping..." : "Execute Swap"}
         </Button>
 
         <div className="rounded-lg border border-white/5 bg-white/5 p-4">

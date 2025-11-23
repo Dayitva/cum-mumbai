@@ -16,8 +16,8 @@ export default function Home() {
             </div>
 
             <h1 className="text-5xl font-bold tracking-tight text-white sm:text-6xl lg:text-7xl">
-              Get <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-cyan-400">100x</span>{" "}
-              Leverage.
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-cyan-400">100x</span>{" "}
+              Your Liquidity.
             </h1>
 
             <p className="max-w-xl text-lg text-muted-foreground">

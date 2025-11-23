@@ -45,7 +45,7 @@ export function NavBar() {
               <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <LockKeyholeIcon className="size-5" />
               </div>
-              <span className="text-lg font-bold tracking-tight">CUM Protocol</span>
+              <span className="text-lg font-bold tracking-tight">Cleverly Utilising Money</span>
             </Link>
 
             <div className="hidden md:flex md:items-center md:gap-1">

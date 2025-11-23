@@ -9,7 +9,7 @@ export default function VaultPage() {
         <p className="text-muted-foreground">Manage your private LP positions</p>
       </div>
 
-      <StatsHeader />
+      {/* <StatsHeader /> */}
 
       <div className="mt-8 flex justify-center">
         <div className="w-full max-w-xl">

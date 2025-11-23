@@ -18,7 +18,7 @@ import { ArrowDownUpIcon, ZapIcon } from "lucide-react"
 // For now, using reasonable defaults
 const DEFAULT_MAKER = "0x1401840C106f6a9bc64Fd3507aBBa5272261088c" as Address
 const DEFAULT_FEE_BPS = BigInt(30) // 0.3% fee (30 basis points)
-const DEFAULT_SALT = "0x0000000000000000000000000000000000000000000000000000000000000001" as const
+const DEFAULT_SALT = "0x0000000000000000000000000000000000000000000000000000000000000002" as const
 
 export function SwapCard() {
   const [fromToken, setFromToken] = useState<Stablecoin>(STABLECOINS[0])

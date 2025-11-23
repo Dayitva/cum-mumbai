@@ -12,7 +12,7 @@ import { useTokenBalance } from "@/hooks/use-token-balance"
 import { useVault } from "@/hooks/use-vault"
 import { useAccount } from "wagmi"
 import { LockIcon, UnlockIcon, CopyIcon, CheckIcon, EyeIcon, EyeOffIcon } from "lucide-react"
-import { formatUnits } from "viem"
+import { formatUnits, type Address } from "viem"
 
 const FIXED_DEPOSIT_AMOUNT = "10" // Fixed deposit amount in tokens
 
@@ -20,7 +20,8 @@ export function VaultCard() {
   const [selectedToken, setSelectedToken] = useState<Stablecoin>(STABLECOINS[0])
   const [depositCommitment, setDepositCommitment] = useState("")
   const [depositedCommitment, setDepositedCommitment] = useState<string | null>(null)
-  const [withdrawNote, setWithdrawNote] = useState("")
+  const [withdrawProof, setWithdrawProof] = useState("")
+  const [withdrawRecipient, setWithdrawRecipient] = useState("")
   const [noteCopied, setNoteCopied] = useState(false)
   const [showNote, setShowNote] = useState(false)
   const { toast } = useToast()
@@ -130,56 +131,57 @@ export function VaultCard() {
       return
     }
 
-    if (!withdrawNote || withdrawNote.trim() === "") {
+    if (!withdrawProof || withdrawProof.trim() === "") {
       toast({
-        title: "Invalid Commitment Note",
-        description: "Please enter your commitment note to withdraw",
+        title: "Proof Required",
+        description: "Please enter the proof generated from your local Noir circuit",
         variant: "destructive",
       })
       return
     }
 
-    // Validate commitment note format (should be 0x followed by 64 hex characters)
-    if (!/^0x[a-fA-F0-9]{64}$/.test(withdrawNote.trim())) {
+    if (!withdrawRecipient || withdrawRecipient.trim() === "") {
       toast({
-        title: "Invalid Commitment Note Format",
-        description: "Commitment note must be a valid 0x-prefixed hex string (66 characters)",
+        title: "Recipient Required",
+        description: "Please enter the recipient address",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate proof format (should be a hex string)
+    const proofTrimmed = withdrawProof.trim()
+    if (!proofTrimmed.startsWith("0x")) {
+      toast({
+        title: "Invalid Proof Format",
+        description: "Proof must be a valid 0x-prefixed hex string",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate recipient address format
+    const recipientTrimmed = withdrawRecipient.trim()
+    if (!/^0x[a-fA-F0-9]{40}$/.test(recipientTrimmed)) {
+      toast({
+        title: "Invalid Recipient Address",
+        description: "Recipient must be a valid Ethereum address (0x followed by 40 hex characters)",
         variant: "destructive",
       })
       return
     }
 
     try {
-      // TODO: Generate proof, merkleRoot, and nullifierHash from the commitment note
-      // For now, this is a placeholder - you'll need to implement the proof generation
-      // This typically requires:
-      // 1. Finding the leaf index in the merkle tree
-      // 2. Generating a zkSNARK proof
-      // 3. Computing the nullifier hash
-      
       toast({
-        title: "Withdrawal Requires Proof",
-        description: "Proof generation is required for withdrawal. This feature needs to be implemented with a proof generation service.",
-        variant: "destructive",
+        title: "Withdrawal Pending",
+        description: "Please confirm the transaction in your wallet...",
       })
-      
-      // Placeholder - uncomment when proof generation is implemented
-      // const proof = "0x..." // Generated proof
-      // const merkleRoot = "0x..." // Current merkle root from vault
-      // const nullifierHash = "0x..." // Computed nullifier hash
-      // 
-      // await vaultWithdraw(
-      //   selectedToken,
-      //   proof,
-      //   merkleRoot,
-      //   nullifierHash,
-      //   address
-      // )
-      
-      // toast({
-      //   title: "Withdrawal Pending",
-      //   description: "Please confirm the transaction in your wallet...",
-      // })
+
+      await vaultWithdraw(
+        selectedToken,
+        proofTrimmed,
+        recipientTrimmed as Address
+      )
     } catch (err: any) {
       toast({
         title: "Withdrawal Failed",
@@ -354,7 +356,7 @@ export function VaultCard() {
             ) : (
               <Button
                 onClick={handleDeposit}
-                disabled={!isConnected || isLoading || isVaultPending || !depositCommitment || (balance && Number.parseFloat(formatUnits(balance, selectedToken.decimals)) < Number.parseFloat(FIXED_DEPOSIT_AMOUNT))}
+                disabled={!isConnected || isLoading || isVaultPending || !depositCommitment || (balance !== undefined && balance !== null && Number.parseFloat(formatUnits(balance, selectedToken.decimals)) < Number.parseFloat(FIXED_DEPOSIT_AMOUNT))}
                 className="h-12 w-full bg-primary text-lg font-semibold text-black hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
                 size="lg"
               >
@@ -393,16 +395,16 @@ export function VaultCard() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="withdraw-note" className="text-xs font-medium uppercase text-muted-foreground">
-                Commitment Note
+              <Label htmlFor="withdraw-proof" className="text-xs font-medium uppercase text-muted-foreground">
+                Proof (from Noir circuit)
               </Label>
               <div className="relative">
                 <input
-                  id="withdraw-note"
+                  id="withdraw-proof"
                   type={showNote ? "text" : "password"}
                   placeholder="0x..."
-                  value={withdrawNote}
-                  onChange={(e) => setWithdrawNote(e.target.value)}
+                  value={withdrawProof}
+                  onChange={(e) => setWithdrawProof(e.target.value)}
                   className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 pr-20 text-sm font-mono text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                 />
                 <Button
@@ -416,7 +418,24 @@ export function VaultCard() {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Enter the commitment note you received when depositing
+                Enter the proof generated from your local Noir circuit
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="withdraw-recipient" className="text-xs font-medium uppercase text-muted-foreground">
+                Recipient Address
+              </Label>
+              <input
+                id="withdraw-recipient"
+                type="text"
+                placeholder="0x..."
+                value={withdrawRecipient}
+                onChange={(e) => setWithdrawRecipient(e.target.value)}
+                className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-mono text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
+              <p className="text-xs text-muted-foreground">
+                Enter the address where you want to receive the withdrawn tokens
               </p>
             </div>
 
@@ -433,7 +452,7 @@ export function VaultCard() {
 
             <Button
               onClick={handleWithdraw}
-              disabled={!withdrawNote || withdrawNote.trim() === "" || isVaultPending}
+              disabled={!withdrawProof || withdrawProof.trim() === "" || !withdrawRecipient || withdrawRecipient.trim() === "" || isVaultPending}
               className="h-12 w-full border-primary/30 bg-transparent text-lg font-semibold text-primary hover:bg-primary/10 hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed"
               variant="outline"
               size="lg"

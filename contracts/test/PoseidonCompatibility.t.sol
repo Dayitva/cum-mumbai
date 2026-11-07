@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import {PoseidonT3} from "../src/libs/pp/Poseidon.sol";
+import {IPoseidonT3} from "../src/libs/pp/PrivateVault.sol";
 
 /**
  * @title PoseidonCompatibility
@@ -10,11 +10,17 @@ import {PoseidonT3} from "../src/libs/pp/Poseidon.sol";
  * @dev These test vectors MUST match the values in src/main.nr to ensure compatibility
  */
 contract PoseidonCompatibilityTest is Test {
+    IPoseidonT3 internal PoseidonT3;
+
+    function setUp() public {
+        PoseidonT3 = IPoseidonT3(deployCode("Poseidon.sol:PoseidonT3"));
+    }
+
     /**
      * @notice Test vector 1 from Noir: hash([1, 2])
      * @dev This MUST match the value in test_poseidon_compatibility() in main.nr line 134-136
      */
-    function test_Noir_TestVector1_Hash1_2() public pure {
+    function test_Noir_TestVector1_Hash1_2() public view {
         uint[2] memory input = [uint(1), uint(2)];
         uint result = PoseidonT3.hash(input);
 
@@ -31,7 +37,7 @@ contract PoseidonCompatibilityTest is Test {
      * The Noir test uses assertEq but doesn't specify the exact expected value in code.
      * TODO: Verify this matches when running actual Noir tests with nargo
      */
-    function test_Noir_TestVector2_Hash123_456() public pure {
+    function test_Noir_TestVector2_Hash123_456() public view {
         uint[2] memory input = [uint(123), uint(456)];
         uint result = PoseidonT3.hash(input);
 
@@ -47,7 +53,7 @@ contract PoseidonCompatibilityTest is Test {
      * @notice Test vector 3 from Noir: Commitment hash([11111111, 22222222])
      * @dev This MUST match the value in test_poseidon_compatibility() in main.nr line 145-147
      */
-    function test_Noir_TestVector3_Commitment() public pure {
+    function test_Noir_TestVector3_Commitment() public view {
         uint[2] memory input = [uint(11111111), uint(22222222)];
         uint result = PoseidonT3.hash(input);
 
@@ -62,7 +68,7 @@ contract PoseidonCompatibilityTest is Test {
      * @dev This MUST match the value in test_empty_tree_root() in main.nr line 151-162
      * This is critical for deposit verification in PrivateVault.sol
      */
-    function test_Noir_EmptyTreeRoot_Depth20() public pure {
+    function test_Noir_EmptyTreeRoot_Depth20() public view {
         bytes32 currentHash = bytes32(0);
         uint256 TREE_DEPTH = 20;
 
@@ -81,7 +87,7 @@ contract PoseidonCompatibilityTest is Test {
      * @notice Test nullifier hash computation (single input with zero padding)
      * @dev Noir computes nullifier_hash as hash([nullifier, 0]) in main.nr line 53-55
      */
-    function test_Noir_NullifierHash() public pure {
+    function test_Noir_NullifierHash() public view {
         uint nullifier = 22222222;
         uint[2] memory input = [nullifier, uint(0)];
         uint nullifier_hash = PoseidonT3.hash(input);
@@ -95,7 +101,7 @@ contract PoseidonCompatibilityTest is Test {
      * @notice Test Merkle tree path computation matches Noir
      * @dev This simulates the compute_merkle_root function from main.nr line 58-81
      */
-    function test_Noir_MerkleRootComputation() public pure {
+    function test_Noir_MerkleRootComputation() public view {
         // Using the commitment from test vector 3: hash([11111111, 22222222])
         uint commitment = 0x027d41a203035596e96fda110d73edf92d17ca4c60b28bf72b0f2bc593f226eb;
 
@@ -119,7 +125,7 @@ contract PoseidonCompatibilityTest is Test {
      * @notice Additional test for hash(0, 0)
      * @dev Useful for computing empty tree levels
      */
-    function test_Hash_Zero_Zero() public pure {
+    function test_Hash_Zero_Zero() public view {
         uint[2] memory input = [uint(0), uint(0)];
         uint result = PoseidonT3.hash(input);
 

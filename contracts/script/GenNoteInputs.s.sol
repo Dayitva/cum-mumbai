@@ -2,7 +2,7 @@
 pragma solidity 0.8.30;
 
 import { Script } from "forge-std/Script.sol";
-import { PoseidonT3 } from "../src/libs/pp/Poseidon.sol";
+import { IPoseidonT3 } from "../src/libs/pp/PrivateVault.sol";
 
 /// Writes the Prover.toml inputs for the fixture notes. Hashing here, with the same
 /// Poseidon the vault uses, means a fixture only verifies if Solidity and Noir agree.
@@ -13,7 +13,10 @@ contract GenNoteInputs is Script {
     address internal constant RELAYER = address(0xB2);
     uint256 internal constant FEE = 0.01e18;
 
+    IPoseidonT3 internal poseidon;
+
     function run() external {
+        poseidon = IPoseidonT3(vm.deployCode("Poseidon.sol:PoseidonT3"));
         uint256 commitment0 = _hash(11111111, 22222222);
         uint256 commitment1 = _hash(33333333, 44444444);
 
@@ -29,15 +32,15 @@ contract GenNoteInputs is Script {
         _write("note1", 33333333, 44444444, 1, siblings1, root1, RECIPIENT, RELAYER, FEE);
     }
 
-    function _rootOf(uint256 leaf, uint256 sibling) internal pure returns (uint256 node) {
+    function _rootOf(uint256 leaf, uint256 sibling) internal view returns (uint256 node) {
         node = _hash(leaf, sibling);
         for (uint256 i = 1; i < DEPTH; i++) {
             node = _hash(node, 0);
         }
     }
 
-    function _hash(uint256 a, uint256 b) internal pure returns (uint256) {
-        return PoseidonT3.hash([a, b]);
+    function _hash(uint256 a, uint256 b) internal view returns (uint256) {
+        return poseidon.hash([a, b]);
     }
 
     function _write(

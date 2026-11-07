@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
-import { formatEther, isAddress, parseEther, type Address } from "viem"
+import { formatEther, isAddress, type Address, type Hex } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,13 +10,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useVaultState } from "@/hooks/use-vault-state"
-import { ACCOUNTS, erc20Abi, publicClient } from "@/lib/chain"
+import { TestTokens } from "@/components/test-tokens"
+import { erc20Abi, EXPLORER, publicClient, RELAYER_FEE } from "@/lib/chain"
 import { VAULT_TOKENS } from "@/lib/deployment"
 import { errorMessage, formatAmount, shortAddress } from "@/lib/format"
 import { decodeNote, encodeNote, newNote } from "@/lib/note"
 import { depositNote, withdrawNote, type WithdrawStage } from "@/lib/vault"
-
-const RELAYER_FEE = parseEther("0.005")
+import { useActor } from "@/lib/wallet"
 
 const STAGE_LABELS: Record<WithdrawStage, string> = {
   scanning: "Rebuilding the Merkle tree on this device...",
@@ -26,10 +26,18 @@ const STAGE_LABELS: Record<WithdrawStage, string> = {
 
 const freshAddress = () => privateKeyToAddress(generatePrivateKey())
 
-type WithdrawResult = { recipient: Address; paid: bigint[]; ethBalance: bigint; provingMs: number; leafCount: number }
+type WithdrawResult = {
+  hash: Hex
+  recipient: Address
+  paid: bigint[]
+  ethBalance: bigint
+  provingMs: number
+  leafCount: number
+}
 
 export function VaultCard() {
   const { state, refresh } = useVaultState()
+  const depositor = useActor("lp")
 
   const [depositing, setDepositing] = useState(false)
   const [depositedNote, setDepositedNote] = useState<string | null>(null)
@@ -46,12 +54,13 @@ export function VaultCard() {
   useEffect(() => setRecipient(freshAddress()), [])
 
   const handleDeposit = async () => {
+    if (!depositor) return
     setDepositing(true)
     setDepositError(null)
     setDepositedNote(null)
     try {
       const note = newNote()
-      await depositNote(ACCOUNTS.lp, note)
+      await depositNote(depositor, note)
       const encoded = encodeNote(note)
       setDepositedNote(encoded)
       setNoteText(encoded)
@@ -78,11 +87,10 @@ export function VaultCard() {
       if (!isAddress(recipient)) throw new Error("That recipient is not a valid address")
 
       const circuit = await fetch("/circuit/cum_circuit.json").then((response) => response.json())
-      const { provingMs, leafCount } = await withdrawNote({
+      const { hash, provingMs, leafCount } = await withdrawNote({
         circuit,
         note,
         recipient,
-        relayer: ACCOUNTS.relayer,
         fee: RELAYER_FEE,
         onStage: setStage,
       })
@@ -100,7 +108,7 @@ export function VaultCard() {
         ),
         publicClient.getBalance({ address: recipient }),
       ])
-      setResult({ recipient, paid, ethBalance, provingMs, leafCount })
+      setResult({ hash, recipient, paid, ethBalance, provingMs, leafCount })
       setRecipient(freshAddress())
       setNoteText("")
       await refresh()
@@ -136,11 +144,12 @@ export function VaultCard() {
                 </div>
               ))}
             </div>
+            <TestTokens />
             <p className="text-xs text-muted-foreground">
-              Paid from the demo LP wallet {shortAddress(ACCOUNTS.lp)}. Everyone can see this wallet joined. The withdrawal
-              does not reveal which deposit it came from.
+              {depositor ? `Paid from ${shortAddress(depositor)}. ` : ""}Everyone can see this wallet joined. The
+              withdrawal does not reveal which deposit it came from.
             </p>
-            <Button className="w-full" onClick={handleDeposit} disabled={depositing}>
+            <Button className="w-full" onClick={handleDeposit} disabled={depositing || !depositor}>
               {depositing ? "Depositing..." : "Deposit one note"}
             </Button>
             {depositError && <p className="text-sm text-destructive">{depositError}</p>}
@@ -210,6 +219,16 @@ export function VaultCard() {
                   ETH held by the recipient: {formatEther(result.ethBalance)}. Proved on this device in{" "}
                   {(result.provingMs / 1000).toFixed(1)}s, hiding among {result.leafCount} deposits.
                 </p>
+                {EXPLORER && (
+                  <p className="flex gap-4 text-xs">
+                    <a className="text-primary underline" href={`${EXPLORER}/tx/${result.hash}`} target="_blank" rel="noreferrer">
+                      Withdrawal on Basescan
+                    </a>
+                    <a className="text-primary underline" href={`${EXPLORER}/address/${result.recipient}`} target="_blank" rel="noreferrer">
+                      Recipient on Basescan
+                    </a>
+                  </p>
+                )}
               </div>
             )}
           </TabsContent>

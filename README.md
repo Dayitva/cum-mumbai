@@ -36,7 +36,7 @@ ETHGlobal Mumbai 2026 through the Continuity Track.
 | Late depositors | Would share yield earned before they joined | Pay the current share price |
 | Proofs in vault tests | `MockVerifier(true)` | Real Noir proofs from `gen_fixtures.sh` |
 | Public deposits | Accepted, but could never be withdrawn | Removed |
-| Reading your Merkle path | `getMerklePath(leaf)` told the RPC which deposit was yours | Function removed. The app rebuilds the tree from events |
+| Reading your Merkle path | `getMerklePath(leaf)` told the RPC which deposit was yours | Function removed. The app reads every commitment and rebuilds the tree itself |
 | Proofs in the app | Generated on the command line and pasted in | Generated in the browser |
 | Site claims | "100x", "100 strategies", made-up stats | Only numbers read from the vault |
 | Tree storage | Every node, with an unbounded root history | Frontier and a fixed ring of 30 roots |
@@ -80,6 +80,25 @@ cd app && npm install --legacy-peer-deps && npm run build && npm start
 
 Then open http://localhost:3000. The demo uses the fork's unlocked test accounts, so it needs no wallet,
 and it only runs against a local fork.
+
+## Deploy to Base Sepolia
+
+1inch has not deployed Aqua or SwapVM on Base Sepolia, so this deploys unmodified copies of both, plus
+mintable mock tokens and a faucet. The sandwich page shows one run recorded on-chain, on a separate sandbox
+vault, because a public chain cannot be rewound.
+
+```bash
+# In contracts/.env, a throwaway wallet funded with a little Base Sepolia ETH
+DEPLOYER_PRIVATE_KEY=0x...
+
+scripts/deploy-sepolia.sh
+
+# In app/.env.local, the same wallet unless you set RELAYER_ADDRESS when deploying
+NEXT_PUBLIC_NETWORK=sepolia
+RELAYER_PRIVATE_KEY=0x...
+
+cd app && npm run build && npm start
+```
 
 ## Tests
 

@@ -4,9 +4,42 @@ import { useState } from "react"
 import { ShieldCheckIcon, SkullIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import type { Hex } from "viem"
+import { EXPLORER } from "@/lib/chain"
 import { USDC, WETH } from "@/lib/deployment"
 import { errorMessage, formatAmount } from "@/lib/format"
+import { IS_SEPOLIA } from "@/lib/network"
 import { compareSandwiches, SANDWICH_SIZE, type SandwichResult } from "@/lib/sandwich"
+import recorded from "@/lib/sandwich.sepolia.json"
+
+const STEP_LABELS = ["1. Attacker buys, front-running", "2. Victim buys", "3. Attacker sells it back"]
+
+function Step({ index, value, hash }: { index: number; value: string; hash?: Hex }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <dt className="text-muted-foreground">
+        {hash && EXPLORER ? (
+          <a className="underline" href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer">
+            {STEP_LABELS[index]}
+          </a>
+        ) : (
+          STEP_LABELS[index]
+        )}
+      </dt>
+      <dd className="font-mono text-white">{value}</dd>
+    </div>
+  )
+}
+
+function parseRecorded(raw: any): SandwichResult {
+  return {
+    bought: BigInt(raw.bought),
+    sold: BigInt(raw.sold),
+    victimOut: BigInt(raw.victimOut),
+    profit: BigInt(raw.profit),
+    hashes: raw.hashes,
+  }
+}
 
 function Result({ title, result, protectedCurve }: { title: string; result: SandwichResult; protectedCurve: boolean }) {
   const lost = result.profit < 0n
@@ -22,24 +55,39 @@ function Result({ title, result, protectedCurve }: { title: string; result: Sand
         {lost ? "-" : "+"}${formatAmount(magnitude, USDC)}
       </p>
       <dl className="mt-4 space-y-1 text-sm">
-        <div className="flex justify-between gap-4">
-          <dt className="text-muted-foreground">1. Attacker buys, front-running</dt>
-          <dd className="font-mono text-white">{formatAmount(result.bought, WETH)} WETH</dd>
-        </div>
-        <div className="flex justify-between gap-4">
-          <dt className="text-muted-foreground">2. Victim buys</dt>
-          <dd className="font-mono text-white">{formatAmount(result.victimOut, WETH)} WETH</dd>
-        </div>
-        <div className="flex justify-between gap-4">
-          <dt className="text-muted-foreground">3. Attacker sells it back</dt>
-          <dd className="font-mono text-white">{formatAmount(result.sold, USDC)} USDC</dd>
-        </div>
+        <Step index={0} value={`${formatAmount(result.bought, WETH)} ${WETH.symbol}`} hash={result.hashes[0]} />
+        <Step index={1} value={`${formatAmount(result.victimOut, WETH)} ${WETH.symbol}`} hash={result.hashes[1]} />
+        <Step index={2} value={`${formatAmount(result.sold, USDC)} ${USDC.symbol}`} hash={result.hashes[2]} />
       </dl>
     </Card>
   )
 }
 
+/** A public chain cannot be rewound, so the testnet shows one recorded run, with its transactions. */
+function RecordedSandwich() {
+  const data = recorded as any
+  if (!data.withoutDecay) return <p className="text-sm text-muted-foreground">No run has been recorded yet.</p>
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-6 md:grid-cols-2">
+        <Result title="Same curve, no decay" result={parseRecorded(data.withoutDecay)} protectedCurve={false} />
+        <Result title="Same curve, with decay" result={parseRecorded(data.withDecay)} protectedCurve />
+      </div>
+      <p className="max-w-2xl text-sm text-muted-foreground">
+        One recorded run on Base Sepolia, on a separate sandbox vault, with mock tokens at the demo&apos;s prices. Each
+        step links to its transaction. Both curves were new copies with the same range, size and fee, differing only in
+        decay. One wallet played both attacker and victim, which does not change the prices.
+      </p>
+    </div>
+  )
+}
+
 export function SandwichCard() {
+  if (IS_SEPOLIA) return <RecordedSandwich />
+  return <LiveSandwich />
+}
+
+function LiveSandwich() {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [results, setResults] = useState<Awaited<ReturnType<typeof compareSandwiches>> | null>(null)

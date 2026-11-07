@@ -72,7 +72,7 @@ async function main() {
   const quote = await readWithdrawQuote()
   console.log(`one note is worth: ${show(quote)}`)
   const relayerGasBefore = await publicClient.getBalance({ address: ACCOUNTS.relayer })
-  const { provingMs, leafCount } = await withdrawNote({ circuit, note, recipient, relayer: ACCOUNTS.relayer, fee })
+  const { provingMs, leafCount } = await withdrawNote({ circuit, note, recipient, fee })
   console.log(`proved in ${Math.round(provingMs)}ms against ${leafCount} notes`)
 
   const paid = await Promise.all(VAULT_TOKENS.map((token) => balanceOf(token.address, recipient)))
@@ -93,7 +93,7 @@ async function main() {
 
   let doubleSpent = true
   try {
-    await withdrawNote({ circuit, note, recipient, relayer: ACCOUNTS.relayer, fee })
+    await withdrawNote({ circuit, note, recipient, fee })
   } catch {
     doubleSpent = false
   }

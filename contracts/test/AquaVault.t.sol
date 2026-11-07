@@ -276,6 +276,23 @@ contract AquaVaultTest is Test {
         assertEq(vault.currentRoot(), inputs1[0]);
     }
 
+    function test_commitmentsCanBeReadInPages() public {
+        _deposit(commitment0);
+        _deposit(commitment1);
+
+        bytes32[] memory all = vault.commitments(0, 100);
+        assertEq(all.length, 2);
+        assertEq(all[0], commitment0);
+        assertEq(all[1], commitment1);
+
+        bytes32[] memory second = vault.commitments(1, 1);
+        assertEq(second.length, 1);
+        assertEq(second[0], commitment1);
+
+        assertEq(vault.commitments(2, 10).length, 0);
+        assertEq(vault.commitments(50, 10).length, 0);
+    }
+
     function test_depositRespectsMaxAmounts() public {
         uint256[] memory maxAmounts = _noMax();
         maxAmounts[1] = SHARE - 1;

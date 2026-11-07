@@ -3,6 +3,8 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { LockKeyholeIcon } from "lucide-react"
+import { WalletButton } from "@/components/wallet-button"
+import { IS_SEPOLIA } from "@/lib/network"
 import { cn } from "@/lib/utils"
 
 const ROUTES = [
@@ -40,9 +42,12 @@ export function NavBar() {
             ))}
           </div>
         </div>
-        <span className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
-          Local Base fork
-        </span>
+        <div className="flex items-center gap-3">
+          <WalletButton />
+          <span className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+            {IS_SEPOLIA ? "Base Sepolia testnet" : "Local Base fork"}
+          </span>
+        </div>
       </div>
     </nav>
   )

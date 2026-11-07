@@ -1,6 +1,5 @@
 import { concat, numberToHex, pad, toHex, type Address, type Hex } from "viem"
-import { base } from "viem/chains"
-import { approveIfNeeded, publicClient, routerAbi, send } from "./chain"
+import { approveIfNeeded, chain, publicClient, routerAbi, send } from "./chain"
 import { ROUTER, type Order } from "./deployment"
 
 const IS_EXACT_IN = 0x0001
@@ -48,6 +47,6 @@ export async function executeSwap(
     functionName: "swap",
     args: [order, tokenIn, tokenOut, amountIn, takerData(minAmountOut)],
     account: taker,
-    chain: base,
+    chain,
   })
 }

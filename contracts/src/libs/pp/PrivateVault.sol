@@ -14,9 +14,10 @@ interface IPoseidonT3 {
 /**
  * @title PrivateVault
  * @notice Merkle tree of note commitments, spent by zero knowledge proof.
- * @dev The contract keeps only the tree's right-hand frontier. There is deliberately no
- * function that returns a Merkle path: asking an RPC node for your path tells it which
- * deposit is yours. Clients rebuild the tree from PrivateDeposit events instead.
+ * @dev There is deliberately no function that returns a Merkle path: asking an RPC node for
+ * your path tells it which deposit is yours. Clients read every commitment and rebuild the
+ * tree themselves, so every client makes the same requests. The commitments are stored
+ * rather than left in event logs because public RPCs limit how far logs can be scanned.
  */
 abstract contract PrivateVault {
     uint256 public constant TREE_DEPTH = 20;
@@ -31,6 +32,7 @@ abstract contract PrivateVault {
     uint256 public withdrawalCount;
     bytes32 public currentRoot;
 
+    bytes32[] private _commitments;
     bytes32[TREE_DEPTH] private _frontier;
     bytes32[ROOT_HISTORY_SIZE] private _rootHistory;
     mapping(bytes32 root => bool) private _knownRoots;
@@ -63,6 +65,16 @@ abstract contract PrivateVault {
         return nextLeafIndex - withdrawalCount;
     }
 
+    /// @notice A page of commitments in tree order. Read them all, never only your own.
+    function commitments(uint256 start, uint256 count) external view returns (bytes32[] memory page) {
+        uint256 total = _commitments.length;
+        uint256 end = start + count > total ? total : start + count;
+        page = new bytes32[](end > start ? end - start : 0);
+        for (uint256 i = 0; i < page.length; i++) {
+            page[i] = _commitments[start + i];
+        }
+    }
+
     function _insertCommitment(bytes32 commitment) internal {
         if (commitment == bytes32(0) || uint256(commitment) >= FIELD_MODULUS) revert InvalidCommitment();
         if (commitmentUsed[commitment]) revert CommitmentAlreadyUsed();
@@ -89,6 +101,7 @@ abstract contract PrivateVault {
         _rootHistory[slot] = newRoot;
         _knownRoots[newRoot] = true;
 
+        _commitments.push(commitment);
         commitmentUsed[commitment] = true;
         currentRoot = newRoot;
         nextLeafIndex = leafIndex + 1;

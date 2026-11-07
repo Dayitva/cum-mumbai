@@ -1,7 +1,7 @@
 import { parseEventLogs, type Address, type Hex } from "viem"
-import { base } from "viem/chains"
-import { approveIfNeeded, erc20Abi, publicClient, send, vaultAbi } from "./chain"
+import { approveIfNeeded, chain, erc20Abi, publicClient, RELAYER, send, vaultAbi } from "./chain"
 import { VAULT, VAULT_TOKENS } from "./deployment"
+import { IS_SEPOLIA } from "./network"
 import { buildPath, fetchCommitments } from "./merkle"
 import { commitmentOf, type Note } from "./note"
 import { proveWithdrawal } from "./prover"
@@ -41,7 +41,7 @@ export async function depositNote(depositor: Address, note: Note) {
     functionName: "deposit",
     args: [commitmentOf(note), maxAmounts],
     account: depositor,
-    chain: base,
+    chain,
   })
   const [deposit] = parseEventLogs({ abi: vaultAbi, logs: receipt.logs, eventName: "PrivateDeposit" })
   return { receipt, leafIndex: Number(deposit.args.leafIndex), amountsPaid: quote }
@@ -49,12 +49,36 @@ export async function depositNote(depositor: Address, note: Note) {
 
 export type WithdrawStage = "scanning" | "proving" | "submitting"
 
+type WithdrawalCall = { proof: Hex; merkleRoot: Hex; nullifierHash: Hex; recipient: Address }
+
+/** On the testnet the relayer's key lives on the server. On the fork the node signs for it. */
+async function relayWithdrawal(call: WithdrawalCall, fee: bigint): Promise<Hex> {
+  if (IS_SEPOLIA) {
+    const response = await fetch("/api/relay", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...call, fee: fee.toString() }),
+    })
+    const body = await response.json()
+    if (!response.ok) throw new Error(body.error ?? "The relayer refused the withdrawal")
+    return body.hash
+  }
+  const receipt = await send(RELAYER, {
+    address: VAULT,
+    abi: vaultAbi,
+    functionName: "withdraw",
+    args: [call.proof, call.merkleRoot, call.nullifierHash, call.recipient, RELAYER, fee],
+    account: RELAYER,
+    chain,
+  })
+  return receipt.transactionHash
+}
+
 /** Rebuilds the tree locally, proves locally, and has the relayer pay the gas. */
 export async function withdrawNote(args: {
   circuit: unknown
   note: Note
   recipient: Address
-  relayer: Address
   fee: bigint
   onStage?: (stage: WithdrawStage) => void
 }): Promise<{ hash: Hex; provingMs: number; leafCount: number }> {
@@ -78,19 +102,12 @@ export async function withdrawNote(args: {
     note: args.note,
     path,
     recipient: args.recipient,
-    relayer: args.relayer,
+    relayer: RELAYER,
     fee: args.fee,
   })
   const provingMs = performance.now() - started
 
   args.onStage?.("submitting")
-  const receipt = await send(args.relayer, {
-    address: VAULT,
-    abi: vaultAbi,
-    functionName: "withdraw",
-    args: [proof, merkleRoot, nullifierHash, args.recipient, args.relayer, args.fee],
-    account: args.relayer,
-    chain: base,
-  })
-  return { hash: receipt.transactionHash, provingMs, leafCount: path.leafCount }
+  const hash = await relayWithdrawal({ proof, merkleRoot, nullifierHash, recipient: args.recipient }, args.fee)
+  return { hash, provingMs, leafCount: path.leafCount }
 }

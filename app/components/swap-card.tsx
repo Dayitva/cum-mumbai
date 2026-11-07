@@ -7,15 +7,19 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ACCOUNTS } from "@/lib/chain"
+import { TestTokens } from "@/components/test-tokens"
+import { RELAYER } from "@/lib/chain"
 import { STRATEGIES } from "@/lib/deployment"
 import { errorMessage, formatAmount, shortAddress } from "@/lib/format"
+import { IS_SEPOLIA } from "@/lib/network"
 import { executeSwap, quoteSwap } from "@/lib/swap"
+import { useActor } from "@/lib/wallet"
 
 const SLIPPAGE_BPS = 50n
 const QUOTE_DELAY_MS = 300
 
 export function SwapCard() {
+  const taker = useActor("trader")
   const [strategyIndex, setStrategyIndex] = useState(0)
   const [reversed, setReversed] = useState(true)
   const [amount, setAmount] = useState("100")
@@ -45,7 +49,8 @@ export function SwapCard() {
     let cancelled = false
     const timer = setTimeout(async () => {
       try {
-        const out = await quoteSwap(strategy.order, tokenIn.address, tokenOut.address, parsedAmount, ACCOUNTS.trader)
+        // A quote does not depend on who asks, so it works before a wallet is connected.
+        const out = await quoteSwap(strategy.order, tokenIn.address, tokenOut.address, parsedAmount, RELAYER)
         if (!cancelled) setQuote(out)
       } catch (error) {
         if (!cancelled) setQuoteError(errorMessage(error))
@@ -60,11 +65,11 @@ export function SwapCard() {
   const minimumOut = quote === null ? null : (quote * (10_000n - SLIPPAGE_BPS)) / 10_000n
 
   const handleSwap = async () => {
-    if (minimumOut === null) return
+    if (minimumOut === null || !taker) return
     setSwapping(true)
     setMessage(null)
     try {
-      await executeSwap(ACCOUNTS.trader, strategy.order, tokenIn.address, tokenOut.address, parsedAmount, minimumOut)
+      await executeSwap(taker, strategy.order, tokenIn.address, tokenOut.address, parsedAmount, minimumOut)
       setMessage(`Swapped ${amount} ${tokenIn.symbol} for ${formatAmount(quote!, tokenOut)} ${tokenOut.symbol}.`)
       setRefreshKey((key) => key + 1)
     } catch (error) {
@@ -78,7 +83,12 @@ export function SwapCard() {
     <Card className="border-white/5 bg-white/5">
       <CardHeader>
         <CardTitle className="text-white">Trade against the vault</CardTitle>
-        <CardDescription>Through 1inch&apos;s deployed SwapVM router. Fees go to note holders.</CardDescription>
+        <CardDescription>
+          {IS_SEPOLIA
+            ? "Through an unmodified copy of 1inch's SwapVM router, as 1inch has not deployed on this testnet."
+            : "Through 1inch's deployed SwapVM router."}{" "}
+          Fees go to note holders.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid grid-cols-2 gap-2">
@@ -121,10 +131,11 @@ export function SwapCard() {
           {quoteError && <p className="mt-1 text-sm text-destructive">{quoteError}</p>}
         </div>
 
-        <Button className="w-full" onClick={handleSwap} disabled={swapping || minimumOut === null}>
+        <TestTokens />
+        <Button className="w-full" onClick={handleSwap} disabled={swapping || minimumOut === null || !taker}>
           {swapping ? "Swapping..." : "Swap"}
         </Button>
-        <p className="text-xs text-muted-foreground">Paid from the demo trader wallet {shortAddress(ACCOUNTS.trader)}.</p>
+        {taker && <p className="text-xs text-muted-foreground">Paid from {shortAddress(taker)}.</p>}
         {message && (
           <p data-testid="swap-message" className="text-sm text-white">
             {message}

@@ -1,5 +1,5 @@
 import type { Hex } from "viem"
-import { DEPLOY_BLOCK, VAULT } from "./deployment"
+import { VAULT } from "./deployment"
 import { publicClient, vaultAbi } from "./chain"
 import { hash2, toBytes32 } from "./note"
 
@@ -7,18 +7,21 @@ export const TREE_DEPTH = 20
 
 export type MerklePath = { pathIndices: number[]; pathElements: bigint[]; root: Hex; leafCount: number }
 
+const PAGE_SIZE = 500n
+
 /** Every deposit's commitment in tree order. Everyone asks for all of them, so the RPC learns nothing. */
 export async function fetchCommitments(): Promise<bigint[]> {
-  const logs = await publicClient.getContractEvents({
-    address: VAULT,
-    abi: vaultAbi,
-    eventName: "PrivateDeposit",
-    fromBlock: DEPLOY_BLOCK,
-    toBlock: "latest",
-  })
-  return logs
-    .sort((a, b) => Number(a.args.leafIndex! - b.args.leafIndex!))
-    .map((log) => BigInt(log.args.commitment!))
+  const all: bigint[] = []
+  for (;;) {
+    const page = await publicClient.readContract({
+      address: VAULT,
+      abi: vaultAbi,
+      functionName: "commitments",
+      args: [BigInt(all.length), PAGE_SIZE],
+    })
+    all.push(...page.map((commitment) => BigInt(commitment)))
+    if (BigInt(page.length) < PAGE_SIZE) return all
+  }
 }
 
 /** Builds the path on this device. Unfilled nodes are zero, as in PrivateVault and the circuit. */

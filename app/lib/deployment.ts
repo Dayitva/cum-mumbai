@@ -1,5 +1,9 @@
-import deployment from "./deployment.json"
+import forkDeployment from "./deployment.json"
+import sepoliaDeployment from "./deployment.sepolia.json"
+import { IS_SEPOLIA } from "./network"
 import type { Address, Hex } from "viem"
+
+const deployment: any = IS_SEPOLIA ? sepoliaDeployment : forkDeployment
 
 export type Order = { maker: Address; traits: bigint; data: Hex }
 
@@ -15,9 +19,15 @@ export type Strategy = {
 
 export type Token = { symbol: string; address: Address; decimals: number }
 
-export const WETH: Token = { symbol: "WETH", address: "0x4200000000000000000000000000000000000006", decimals: 18 }
-export const USDC: Token = { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }
-export const USDT: Token = { symbol: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6 }
+export const WETH: Token = IS_SEPOLIA
+  ? { symbol: "mWETH", address: deployment.weth, decimals: 18 }
+  : { symbol: "WETH", address: "0x4200000000000000000000000000000000000006", decimals: 18 }
+export const USDC: Token = IS_SEPOLIA
+  ? { symbol: "mUSDC", address: deployment.usdc, decimals: 6 }
+  : { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }
+export const USDT: Token = IS_SEPOLIA
+  ? { symbol: "mUSDT", address: deployment.usdt, decimals: 6 }
+  : { symbol: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6 }
 
 /** In the order the vault holds them, which is the order its quotes are returned in. */
 export const VAULT_TOKENS = [WETH, USDC, USDT]
@@ -45,19 +55,21 @@ function strategy(
 export const VAULT = deployment.vault as Address
 export const ROUTER = deployment.router as Address
 export const AQUA = deployment.aqua as Address
-export const DEPLOY_BLOCK = BigInt(deployment.deployBlock)
+export const FAUCET = deployment.faucet as Address
+export const DEPLOYER = deployment.deployer as Address
+export const SEPOLIA_RELAYER = deployment.relayer as Address
 export const SEED_NOTES = deployment.seedNotes
 
 export const VOLATILE_STRATEGY = strategy(
   deployment.volatileStrategy,
-  "WETH / USDC",
+  `${WETH.symbol} / ${USDC.symbol}`,
   "Concentrated liquidity from 2,400 to 3,750, with decay against sandwiches. 0.30% fee.",
   WETH,
   USDC,
 )
 export const PEGGED_STRATEGY = strategy(
   deployment.peggedStrategy,
-  "USDC / USDT",
+  `${USDC.symbol} / ${USDT.symbol}`,
   "PeggedSwap, low slippage around 1:1. 0.01% fee.",
   USDC,
   USDT,

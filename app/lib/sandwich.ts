@@ -1,6 +1,5 @@
-import { parseUnits, type Address } from "viem"
-import { base } from "viem/chains"
-import { ACCOUNTS, erc20Abi, publicClient, send, testClient, vaultAbi } from "./chain"
+import { parseUnits, type Address, type Hex } from "viem"
+import { ACCOUNTS, chain, erc20Abi, publicClient, send, testClient, vaultAbi } from "./chain"
 import { FRESH_DECAY_STRATEGY, NO_DECAY_STRATEGY, USDC, VAULT, WETH, type Strategy } from "./deployment"
 import { executeSwap } from "./swap"
 
@@ -11,6 +10,8 @@ export type SandwichResult = {
   sold: bigint
   profit: bigint
   victimOut: bigint
+  /** The attacker's buy, the victim's buy and the attacker's sell. */
+  hashes: Hex[]
 }
 
 const balanceOf = (token: Address, owner: Address) =>
@@ -18,15 +19,21 @@ const balanceOf = (token: Address, owner: Address) =>
 
 async function swapAndMeasure(taker: Address, strategy: Strategy, tokenIn: Address, tokenOut: Address, amountIn: bigint) {
   const before = await balanceOf(tokenOut, taker)
-  await executeSwap(taker, strategy.order, tokenIn, tokenOut, amountIn, 0n)
-  return (await balanceOf(tokenOut, taker)) - before
+  const receipt = await executeSwap(taker, strategy.order, tokenIn, tokenOut, amountIn, 0n)
+  return { out: (await balanceOf(tokenOut, taker)) - before, hash: receipt.transactionHash }
 }
 
-async function sandwich(strategy: Strategy): Promise<SandwichResult> {
-  const bought = await swapAndMeasure(ACCOUNTS.attacker, strategy, USDC.address, WETH.address, SANDWICH_SIZE)
-  const victimOut = await swapAndMeasure(ACCOUNTS.victim, strategy, USDC.address, WETH.address, SANDWICH_SIZE)
-  const sold = await swapAndMeasure(ACCOUNTS.attacker, strategy, WETH.address, USDC.address, bought)
-  return { bought, sold, victimOut, profit: sold - SANDWICH_SIZE }
+export async function runSandwich(strategy: Strategy): Promise<SandwichResult> {
+  const buy = await swapAndMeasure(ACCOUNTS.attacker, strategy, USDC.address, WETH.address, SANDWICH_SIZE)
+  const victim = await swapAndMeasure(ACCOUNTS.victim, strategy, USDC.address, WETH.address, SANDWICH_SIZE)
+  const sell = await swapAndMeasure(ACCOUNTS.attacker, strategy, WETH.address, USDC.address, buy.out)
+  return {
+    bought: buy.out,
+    victimOut: victim.out,
+    sold: sell.out,
+    profit: sell.out - SANDWICH_SIZE,
+    hashes: [buy.hash, victim.hash, sell.hash],
+  }
 }
 
 async function shipFresh(strategy: Strategy) {
@@ -37,7 +44,7 @@ async function shipFresh(strategy: Strategy) {
     abi: vaultAbi,
     args: [strategy.order, tokens, amounts],
     account: ACCOUNTS.curator,
-    chain: base,
+    chain,
   } as const
   await send(ACCOUNTS.curator, { ...call, functionName: "proposeStrategy" })
   await testClient.increaseTime({ seconds: 86_401 })
@@ -64,7 +71,7 @@ export async function compareSandwiches(): Promise<{ withoutDecay: SandwichResul
   const attack = (strategy: Strategy) =>
     inSnapshot(async () => {
       await shipFresh(strategy)
-      return sandwich(strategy)
+      return runSandwich(strategy)
     })
   const withoutDecay = await attack(NO_DECAY_STRATEGY)
   const withDecay = await attack(FRESH_DECAY_STRATEGY)

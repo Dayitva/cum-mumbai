@@ -2,6 +2,7 @@ import Link from "next/link"
 import { ArrowRightIcon, LayersIcon, ShieldCheckIcon, SwordsIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { VaultStats } from "@/components/vault-stats"
+import { IS_SEPOLIA } from "@/lib/network"
 
 const FEATURES = [
   {
@@ -65,7 +66,10 @@ export default function Home() {
       </section>
 
       <p className="text-sm text-muted-foreground">
-        Hackathon code, not audited. This demo runs on a local fork of Base with test accounts and seeded notes.
+        Hackathon code, not audited.{" "}
+        {IS_SEPOLIA
+          ? "This runs on Base Sepolia with mock tokens, seeded notes and unmodified copies of 1inch's Aqua and SwapVM, which 1inch has not deployed on this testnet."
+          : "This demo runs on a local fork of Base with test accounts and seeded notes."}
       </p>
     </div>
   )

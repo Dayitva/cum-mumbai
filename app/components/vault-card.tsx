@@ -1,498 +1,219 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useEffect, useState } from "react"
+import { CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
+import { formatEther, isAddress, parseEther, type Address } from "viem"
+import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { STABLECOINS, type Stablecoin } from "@/lib/constants"
-import { useToast } from "@/hooks/use-toast"
-import { useTokenBalance } from "@/hooks/use-token-balance"
-import { useVault } from "@/hooks/use-vault"
-import { useAccount } from "wagmi"
-import { LockIcon, UnlockIcon, CopyIcon, CheckIcon, EyeIcon, EyeOffIcon } from "lucide-react"
-import { formatUnits, type Address } from "viem"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useVaultState } from "@/hooks/use-vault-state"
+import { ACCOUNTS, erc20Abi, publicClient } from "@/lib/chain"
+import { VAULT_TOKENS } from "@/lib/deployment"
+import { errorMessage, formatAmount, shortAddress } from "@/lib/format"
+import { decodeNote, encodeNote, newNote } from "@/lib/note"
+import { depositNote, withdrawNote, type WithdrawStage } from "@/lib/vault"
 
-const FIXED_DEPOSIT_AMOUNT = "10" // Fixed deposit amount in tokens
+const RELAYER_FEE = parseEther("0.005")
+
+const STAGE_LABELS: Record<WithdrawStage, string> = {
+  scanning: "Rebuilding the Merkle tree on this device...",
+  proving: "Generating the proof on this device...",
+  submitting: "Relayer is submitting the withdrawal...",
+}
+
+const freshAddress = () => privateKeyToAddress(generatePrivateKey())
+
+type WithdrawResult = { recipient: Address; paid: bigint[]; ethBalance: bigint; provingMs: number; leafCount: number }
 
 export function VaultCard() {
-  const [selectedToken, setSelectedToken] = useState<Stablecoin>(STABLECOINS[0])
-  const [depositCommitment, setDepositCommitment] = useState("")
-  const [depositedCommitment, setDepositedCommitment] = useState<string | null>(null)
-  const [withdrawProof, setWithdrawProof] = useState("")
-  const [withdrawRecipient, setWithdrawRecipient] = useState("")
-  const [noteCopied, setNoteCopied] = useState(false)
-  const [showNote, setShowNote] = useState(false)
-  const { toast } = useToast()
-  const { address, isConnected } = useAccount()
-  const { balance, formatted, isLoading, error, switchToBase } = useTokenBalance(selectedToken)
-  const { deposit: vaultDeposit, withdraw: vaultWithdraw, isPending: isVaultPending, isSuccess: isVaultSuccess, error: vaultError, hash } = useVault()
+  const { state, refresh } = useVaultState()
 
-  // Handle transaction success
-  useEffect(() => {
-    if (isVaultSuccess && hash && depositedCommitment) {
-      toast({
-        title: "Deposit Successful",
-        description: `Deposited ${FIXED_DEPOSIT_AMOUNT} ${selectedToken.symbol}. Save your commitment note!`,
-      })
-    }
-  }, [isVaultSuccess, hash, selectedToken, depositedCommitment, toast])
+  const [depositing, setDepositing] = useState(false)
+  const [depositedNote, setDepositedNote] = useState<string | null>(null)
+  const [depositError, setDepositError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
-  // Handle transaction errors
-  useEffect(() => {
-    if (vaultError) {
-      toast({
-        title: "Transaction Failed",
-        description: vaultError.message || "Transaction failed. Please try again.",
-        variant: "destructive",
-      })
-    }
-  }, [vaultError, toast])
+  const [noteText, setNoteText] = useState("")
+  const [recipient, setRecipient] = useState<string>("")
+  const [stage, setStage] = useState<WithdrawStage | null>(null)
+  const [withdrawError, setWithdrawError] = useState<string | null>(null)
+  const [result, setResult] = useState<WithdrawResult | null>(null)
+
+  // Random, so generated after mount to keep the server and client render the same.
+  useEffect(() => setRecipient(freshAddress()), [])
 
   const handleDeposit = async () => {
-    if (!isConnected) {
-      toast({
-        title: "Wallet Not Connected",
-        description: "Please connect your wallet to deposit",
-        variant: "destructive",
-      })
-      return
-    }
-
-    if (!depositCommitment || depositCommitment.trim() === "") {
-      toast({
-        title: "Commitment Required",
-        description: "Please enter your commitment (generated from your Noir circuit)",
-        variant: "destructive",
-      })
-      return
-    }
-
-    // Validate commitment format (should be 0x followed by 64 hex characters)
-    if (!/^0x[a-fA-F0-9]{64}$/.test(depositCommitment.trim())) {
-      toast({
-        title: "Invalid Commitment Format",
-        description: "Commitment must be a valid 0x-prefixed hex string (66 characters)",
-        variant: "destructive",
-      })
-      return
-    }
-
-    const depositAmountNum = Number.parseFloat(FIXED_DEPOSIT_AMOUNT)
-    if (!balance || depositAmountNum <= 0) {
-      toast({
-        title: "Insufficient Balance",
-        description: `You need at least ${FIXED_DEPOSIT_AMOUNT} ${selectedToken.symbol} to deposit`,
-        variant: "destructive",
-      })
-      return
-    }
-
-    const balanceNum = Number.parseFloat(formatUnits(balance, selectedToken.decimals))
-    if (balanceNum < depositAmountNum) {
-      toast({
-        title: "Insufficient Balance",
-        description: `You have ${formatted} ${selectedToken.symbol}, but need ${FIXED_DEPOSIT_AMOUNT} ${selectedToken.symbol}`,
-        variant: "destructive",
-      })
-      return
-    }
-
+    setDepositing(true)
+    setDepositError(null)
+    setDepositedNote(null)
     try {
-      const commitment = depositCommitment.trim()
-      
-      toast({
-        title: "Deposit Pending",
-        description: "Please confirm the transaction in your wallet...",
-      })
-
-      await vaultDeposit(selectedToken, FIXED_DEPOSIT_AMOUNT, commitment)
-      
-      // Save the commitment after successful deposit
-      setDepositedCommitment(commitment)
-      setDepositCommitment("") // Clear input for next deposit
-    } catch (err: any) {
-      toast({
-        title: "Deposit Failed",
-        description: err?.message || "Failed to deposit. Please try again.",
-        variant: "destructive",
-      })
+      const note = newNote()
+      await depositNote(ACCOUNTS.lp, note)
+      const encoded = encodeNote(note)
+      setDepositedNote(encoded)
+      setNoteText(encoded)
+      await refresh()
+    } catch (error) {
+      setDepositError(errorMessage(error))
+    } finally {
+      setDepositing(false)
     }
+  }
+
+  const handleCopy = async () => {
+    if (!depositedNote) return
+    await navigator.clipboard.writeText(depositedNote)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2_000)
   }
 
   const handleWithdraw = async () => {
-    if (!isConnected || !address) {
-      toast({
-        title: "Wallet Not Connected",
-        description: "Please connect your wallet to withdraw",
-        variant: "destructive",
-      })
-      return
-    }
-
-    if (!withdrawProof || withdrawProof.trim() === "") {
-      toast({
-        title: "Proof Required",
-        description: "Please enter the proof generated from your local Noir circuit",
-        variant: "destructive",
-      })
-      return
-    }
-
-    if (!withdrawRecipient || withdrawRecipient.trim() === "") {
-      toast({
-        title: "Recipient Required",
-        description: "Please enter the recipient address",
-        variant: "destructive",
-      })
-      return
-    }
-
-    // Validate proof format (should be a hex string)
-    const proofTrimmed = withdrawProof.trim()
-    if (!proofTrimmed.startsWith("0x")) {
-      toast({
-        title: "Invalid Proof Format",
-        description: "Proof must be a valid 0x-prefixed hex string",
-        variant: "destructive",
-      })
-      return
-    }
-
-    // Validate recipient address format
-    const recipientTrimmed = withdrawRecipient.trim()
-    if (!/^0x[a-fA-F0-9]{40}$/.test(recipientTrimmed)) {
-      toast({
-        title: "Invalid Recipient Address",
-        description: "Recipient must be a valid Ethereum address (0x followed by 40 hex characters)",
-        variant: "destructive",
-      })
-      return
-    }
-
+    setWithdrawError(null)
+    setResult(null)
     try {
-      toast({
-        title: "Withdrawal Pending",
-        description: "Please confirm the transaction in your wallet...",
+      const note = decodeNote(noteText)
+      if (!isAddress(recipient)) throw new Error("That recipient is not a valid address")
+
+      const circuit = await fetch("/circuit/cum_circuit.json").then((response) => response.json())
+      const { provingMs, leafCount } = await withdrawNote({
+        circuit,
+        note,
+        recipient,
+        relayer: ACCOUNTS.relayer,
+        fee: RELAYER_FEE,
+        onStage: setStage,
       })
 
-      await vaultWithdraw(
-        selectedToken,
-        proofTrimmed,
-        recipientTrimmed as Address
-      )
-    } catch (err: any) {
-      toast({
-        title: "Withdrawal Failed",
-        description: err?.message || "Failed to withdraw. Please try again.",
-        variant: "destructive",
-      })
-    }
-  }
-
-  const copyCommitmentNote = () => {
-    if (depositedCommitment) {
-      navigator.clipboard.writeText(depositedCommitment)
-      setNoteCopied(true)
-      toast({
-        title: "Copied!",
-        description: "Commitment note copied to clipboard. Keep it safe!",
-      })
-      setTimeout(() => setNoteCopied(false), 2000)
+      const [paid, ethBalance] = await Promise.all([
+        Promise.all(
+          VAULT_TOKENS.map((token) =>
+            publicClient.readContract({
+              address: token.address,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [recipient],
+            }),
+          ),
+        ),
+        publicClient.getBalance({ address: recipient }),
+      ])
+      setResult({ recipient, paid, ethBalance, provingMs, leafCount })
+      setRecipient(freshAddress())
+      setNoteText("")
+      await refresh()
+    } catch (error) {
+      setWithdrawError(errorMessage(error))
+    } finally {
+      setStage(null)
     }
   }
 
   return (
-    <Card className="border-primary/20 bg-black/40 backdrop-blur-xl shadow-2xl shadow-primary/5">
-      <CardHeader className="border-b border-white/5 pb-6">
-        <CardTitle className="flex items-center gap-2 text-xl text-white">
-          <LockIcon className="size-5 text-primary" />
-          Privacy-Preserving LP Vault
-        </CardTitle>
-        <CardDescription className="text-sm text-muted-foreground mt-2">
-          Deposit a fixed amount of tokens and receive a commitment note. Withdraw anonymously using your note.
-          Supports multiple tokens for enhanced privacy.
-        </CardDescription>
+    <Card className="border-white/5 bg-white/5">
+      <CardHeader>
+        <CardTitle className="text-white">Your private position</CardTitle>
+        <CardDescription>One note is one share of the vault, in every token it holds.</CardDescription>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue="deposit" className="w-full">
-          <TabsList className="grid w-full grid-cols-2 bg-white/5">
-            <TabsTrigger value="deposit" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary">
-              Deposit
-            </TabsTrigger>
-            <TabsTrigger
-              value="withdraw"
-              className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary"
-            >
-              Withdraw
-            </TabsTrigger>
+        <Tabs defaultValue="deposit">
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="deposit">Deposit</TabsTrigger>
+            <TabsTrigger value="withdraw">Withdraw</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="deposit" className="space-y-4 pt-6">
-            <div className="space-y-2">
-              <Label htmlFor="deposit-token" className="text-xs font-medium uppercase text-muted-foreground">
-                Select Token
-              </Label>
-              <Select
-                value={selectedToken.symbol}
-                onValueChange={(value) => {
-                  const token = STABLECOINS.find((t) => t.symbol === value)
-                  if (token) {
-                    setSelectedToken(token)
-                    setDepositCommitment("") // Reset commitment input when token changes
-                    setDepositedCommitment(null) // Reset deposited commitment when token changes
-                  }
-                }}
-              >
-                <SelectTrigger id="deposit-token">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STABLECOINS.map((token) => (
-                    <SelectItem key={token.symbol} value={token.symbol} className="focus:bg-primary/10">
-                      <span className="flex items-center gap-2">
-                        <span>{token.icon}</span>
-                        <span>{token.symbol}</span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="deposit-commitment" className="text-xs font-medium uppercase text-muted-foreground">
-                Commitment (from Noir circuit)
-              </Label>
-              <div className="relative">
-                <input
-                  id="deposit-commitment"
-                  type={showNote ? "text" : "password"}
-                  placeholder="0x..."
-                  value={depositCommitment}
-                  onChange={(e) => setDepositCommitment(e.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 pr-20 text-sm font-mono text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowNote(!showNote)}
-                  className="absolute right-1 top-1/2 h-7 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  {showNote ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Enter the commitment generated by your local Noir circuit
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm space-y-3">
-              <div className="flex justify-between items-center">
-                <span className="text-muted-foreground">Fixed Deposit Amount:</span>
-                <span className="font-mono font-bold text-primary text-lg">{FIXED_DEPOSIT_AMOUNT} {selectedToken.symbol}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Your Balance:</span>
-                <span className="font-mono text-white">
-                  {isConnected ? (isLoading ? "Loading..." : `${formatted} ${selectedToken.symbol}`) : "Connect wallet"}
-                </span>
-              </div>
-              {error && error.message === "Please switch to Base network" && switchToBase && (
-                <Button
-                  onClick={switchToBase}
-                  className="w-full mt-2 bg-primary text-black hover:bg-primary/90"
-                  size="sm"
-                >
-                  Switch to Base Network
-                </Button>
-              )}
-            </div>
-
-            {depositedCommitment ? (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <Label className="text-xs font-medium uppercase text-green-400">Your Commitment Note</Label>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setShowNote(!showNote)}
-                        className="h-7 text-xs text-green-400 hover:text-green-300"
-                      >
-                        {showNote ? <EyeOffIcon className="size-3" /> : <EyeIcon className="size-3" />}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={copyCommitmentNote}
-                        className="h-7 text-xs text-green-400 hover:text-green-300"
-                      >
-                        {noteCopied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="font-mono text-xs break-all text-green-300 bg-black/20 p-2 rounded border border-green-500/20">
-                    {showNote ? depositedCommitment : "•".repeat(66)}
-                  </div>
-                  <p className="text-xs text-green-400/80 mt-2">
-                    ⚠️ Save this note securely! You'll need it to withdraw your deposit anonymously.
-                  </p>
+          <TabsContent value="deposit" className="space-y-4 pt-4">
+            <div className="rounded-lg border border-white/5 bg-black/30 p-4">
+              <p className="mb-2 text-sm text-muted-foreground">One note costs, right now</p>
+              {VAULT_TOKENS.map((token, i) => (
+                <div key={token.symbol} className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">{token.symbol}</span>
+                  <span className="font-mono text-white">
+                    {state ? formatAmount(state.depositQuote[i], token) : "..."}
+                  </span>
                 </div>
-                <Button
-                  onClick={() => {
-                    setDepositedCommitment(null)
-                    setDepositCommitment("")
-                  }}
-                  variant="outline"
-                  className="w-full border-primary/30 text-primary hover:bg-primary/10"
-                >
-                  Make Another Deposit
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Paid from the demo LP wallet {shortAddress(ACCOUNTS.lp)}. Everyone can see this wallet joined. The withdrawal
+              does not reveal which deposit it came from.
+            </p>
+            <Button className="w-full" onClick={handleDeposit} disabled={depositing}>
+              {depositing ? "Depositing..." : "Deposit one note"}
+            </Button>
+            {depositError && <p className="text-sm text-destructive">{depositError}</p>}
+
+            {depositedNote && (
+              <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/10 p-4">
+                <p className="text-sm font-semibold text-white">Save this note. It is the only way to withdraw.</p>
+                <p data-testid="note" className="break-all font-mono text-xs text-white">
+                  {depositedNote}
+                </p>
+                <Button variant="outline" size="sm" className="gap-2" onClick={handleCopy}>
+                  {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
+                  {copied ? "Copied" : "Copy note"}
                 </Button>
               </div>
-            ) : (
-              <Button
-                onClick={handleDeposit}
-                disabled={!isConnected || isLoading || isVaultPending || !depositCommitment || (balance !== undefined && balance !== null && Number.parseFloat(formatUnits(balance, selectedToken.decimals)) < Number.parseFloat(FIXED_DEPOSIT_AMOUNT))}
-                className="h-12 w-full bg-primary text-lg font-semibold text-black hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-                size="lg"
-              >
-                <LockIcon className="mr-2 size-5" />
-                {isVaultPending ? "Processing..." : `Deposit ${FIXED_DEPOSIT_AMOUNT} ${selectedToken.symbol}`}
-              </Button>
             )}
           </TabsContent>
 
-          <TabsContent value="withdraw" className="space-y-4 pt-6">
+          <TabsContent value="withdraw" className="space-y-4 pt-4">
             <div className="space-y-2">
-              <Label htmlFor="withdraw-token" className="text-xs font-medium uppercase text-muted-foreground">
-                Select Token
-              </Label>
-              <Select
-                value={selectedToken.symbol}
-                onValueChange={(value) => {
-                  const token = STABLECOINS.find((t) => t.symbol === value)
-                  if (token) setSelectedToken(token)
-                }}
-              >
-                <SelectTrigger id="withdraw-token">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STABLECOINS.map((token) => (
-                    <SelectItem key={token.symbol} value={token.symbol} className="focus:bg-primary/10">
-                      <span className="flex items-center gap-2">
-                        <span>{token.icon}</span>
-                        <span>{token.symbol}</span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label htmlFor="note">Your note</Label>
+              <Input
+                id="note"
+                value={noteText}
+                onChange={(event) => setNoteText(event.target.value)}
+                placeholder="cum-note-..."
+                className="font-mono text-xs"
+              />
             </div>
-
             <div className="space-y-2">
-              <Label htmlFor="withdraw-proof" className="text-xs font-medium uppercase text-muted-foreground">
-                Proof (from Noir circuit)
-              </Label>
-              <div className="relative">
-                <input
-                  id="withdraw-proof"
-                  type={showNote ? "text" : "password"}
-                  placeholder="0x..."
-                  value={withdrawProof}
-                  onChange={(e) => setWithdrawProof(e.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 pr-20 text-sm font-mono text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+              <Label htmlFor="recipient">Send to</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="recipient"
+                  value={recipient}
+                  onChange={(event) => setRecipient(event.target.value)}
+                  className="font-mono text-xs"
                 />
                 <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowNote(!showNote)}
-                  className="absolute right-1 top-1/2 h-7 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Generate a new address"
+                  onClick={() => setRecipient(freshAddress())}
                 >
-                  {showNote ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
+                  <RefreshCwIcon className="size-4" />
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Enter the proof generated from your local Noir circuit
+                A brand new address with no ETH. A relayer pays the gas and keeps 0.5%.
               </p>
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="withdraw-recipient" className="text-xs font-medium uppercase text-muted-foreground">
-                Recipient Address
-              </Label>
-              <input
-                id="withdraw-recipient"
-                type="text"
-                placeholder="0x..."
-                value={withdrawRecipient}
-                onChange={(e) => setWithdrawRecipient(e.target.value)}
-                className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-mono text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
-              <p className="text-xs text-muted-foreground">
-                Enter the address where you want to receive the withdrawn tokens
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Withdrawal Amount:</span>
-                <span className="font-mono font-bold text-primary">{FIXED_DEPOSIT_AMOUNT} {selectedToken.symbol}</span>
-              </div>
-              <div className="mt-2 flex justify-between">
-                <span className="text-muted-foreground">Privacy:</span>
-                <span className="text-xs text-primary">Anonymous withdrawal</span>
-              </div>
-            </div>
-
-            <Button
-              onClick={handleWithdraw}
-              disabled={!withdrawProof || withdrawProof.trim() === "" || !withdrawRecipient || withdrawRecipient.trim() === "" || isVaultPending}
-              className="h-12 w-full border-primary/30 bg-transparent text-lg font-semibold text-primary hover:bg-primary/10 hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed"
-              variant="outline"
-              size="lg"
-            >
-              <UnlockIcon className="mr-2 size-5" />
-              {isVaultPending ? "Processing..." : "Withdraw Anonymously"}
+            <Button className="w-full" onClick={handleWithdraw} disabled={stage !== null || !noteText}>
+              {stage ? STAGE_LABELS[stage] : "Withdraw"}
             </Button>
+            {withdrawError && <p className="text-sm text-destructive">{withdrawError}</p>}
+
+            {result && (
+              <div data-testid="withdraw-result" className="space-y-2 rounded-lg border border-primary/30 bg-primary/10 p-4">
+                <p className="text-sm font-semibold text-white">Withdrawn to {shortAddress(result.recipient)}</p>
+                {VAULT_TOKENS.map((token, i) => (
+                  <div key={token.symbol} className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">{token.symbol}</span>
+                    <span className="font-mono text-white">{formatAmount(result.paid[i], token)}</span>
+                  </div>
+                ))}
+                <p className="text-xs text-muted-foreground">
+                  ETH held by the recipient: {formatEther(result.ethBalance)}. Proved on this device in{" "}
+                  {(result.provingMs / 1000).toFixed(1)}s, hiding among {result.leafCount} deposits.
+                </p>
+              </div>
+            )}
           </TabsContent>
         </Tabs>
-
-        <div className="mt-6 space-y-3">
-          <div className="rounded-lg border border-white/5 bg-white/5 p-4">
-            <div className="flex items-start gap-3 text-xs text-muted-foreground">
-              <div className="mt-0.5 rounded-full bg-primary/10 p-1 text-primary">
-                <LockIcon className="size-3" />
-              </div>
-              <div>
-                <p className="font-semibold text-white">Privacy-Preserving Deposits</p>
-                <p className="mt-1 leading-relaxed opacity-80">
-                  Deposit a fixed amount and receive a commitment note. Your deposit is mixed with others, making it
-                  impossible to link your deposit to your withdrawal. Similar to Tornado Cash, but with multi-token support.
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-            <div className="flex items-start gap-3 text-xs text-muted-foreground">
-              <div className="mt-0.5 rounded-full bg-primary/20 p-1 text-primary">
-                <UnlockIcon className="size-3" />
-              </div>
-              <div>
-                <p className="font-semibold text-white">Anonymous Withdrawals</p>
-                <p className="mt-1 leading-relaxed opacity-80">
-                  Use your commitment note to withdraw to any address. The withdrawal cannot be traced back to your
-                  original deposit, ensuring complete privacy.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
       </CardContent>
     </Card>
   )

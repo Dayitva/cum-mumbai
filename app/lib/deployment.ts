@@ -70,4 +70,12 @@ export const NO_DECAY_STRATEGY = strategy(
   USDC,
 )
 
+export const FRESH_DECAY_STRATEGY = strategy(
+  deployment.freshDecayStrategy,
+  "WETH / USDC with decay",
+  "A new copy of the vault's volatile curve, with no trading history.",
+  WETH,
+  USDC,
+)
+
 export const STRATEGIES = [VOLATILE_STRATEGY, PEGGED_STRATEGY]

@@ -135,12 +135,17 @@ contract DeployDemo is Script {
         (, uint256[] memory peggedAmounts) = _peggedShipment();
         string memory volatileJson = _writeStrategy("volatile", volatilePair, volatileAmounts);
         string memory peggedJson = _writeStrategy("pegged", peggedPair, peggedAmounts);
-        // Never shipped here. The app ships it inside a reverted snapshot to compare sandwiches.
+        // Never shipped here. The app ships these fresh inside reverted snapshots, so that the
+        // sandwich comparison starts both curves from the same state.
         CumPrograms programs = new CumPrograms(AQUA);
         ISwapVM.Order memory noDecay = programs.order(
             volatilePair.maker, programs.volatilePair(2400e6, 3750e6, 0, 30, 3)
         );
+        ISwapVM.Order memory freshDecay = programs.order(
+            volatilePair.maker, programs.volatilePair(2400e6, 3750e6, 300, 30, 4)
+        );
         vm.serializeString(state, "noDecayStrategy", _writeStrategy("noDecay", noDecay, volatileAmounts));
+        vm.serializeString(state, "freshDecayStrategy", _writeStrategy("freshDecay", freshDecay, volatileAmounts));
         vm.serializeString(state, "volatileStrategy", volatileJson);
         return vm.serializeString(state, "peggedStrategy", peggedJson);
     }

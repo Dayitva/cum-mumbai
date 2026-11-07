@@ -33,6 +33,14 @@ async function main() {
   console.log("sandwich with decay, profit USDC:", formatUnits(sandwiches.withDecay.profit, USDC.decimals))
   check(sandwiches.withoutDecay.profit > 0n, "the sandwich profits without decay")
   check(sandwiches.withDecay.profit < 0n, "the same sandwich loses with decay")
+  // Decay depends on the seconds between the transactions, so allow a dollar of timing noise.
+  const withinADollar = (a: bigint, b: bigint) => (a > b ? a - b : b - a) <= parseUnits("1", USDC.decimals)
+  const again = await compareSandwiches()
+  check(
+    withinADollar(again.withoutDecay.profit, sandwiches.withoutDecay.profit) &&
+      withinADollar(again.withDecay.profit, sandwiches.withDecay.profit),
+    "the comparison gives the same result every run",
+  )
 
   const note = newNote()
   const { leafIndex, amountsPaid } = await depositNote(ACCOUNTS.lp, note)
@@ -90,6 +98,12 @@ async function main() {
     doubleSpent = false
   }
   check(!doubleSpent, "the same note cannot be withdrawn twice")
+
+  const afterTrading = await compareSandwiches()
+  check(
+    withinADollar(afterTrading.withDecay.profit, sandwiches.withDecay.profit),
+    "trading on the vault does not skew the comparison",
+  )
 
   const nextPrice = await readDepositQuote()
   console.log(`a new deposit now costs: ${show(nextPrice)}`)

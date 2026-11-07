@@ -1,7 +1,7 @@
 import { parseUnits, type Address } from "viem"
 import { base } from "viem/chains"
 import { ACCOUNTS, erc20Abi, publicClient, send, testClient, vaultAbi } from "./chain"
-import { NO_DECAY_STRATEGY, USDC, VAULT, VOLATILE_STRATEGY, WETH, type Strategy } from "./deployment"
+import { FRESH_DECAY_STRATEGY, NO_DECAY_STRATEGY, USDC, VAULT, WETH, type Strategy } from "./deployment"
 import { executeSwap } from "./swap"
 
 export const SANDWICH_SIZE = parseUnits("1000", USDC.decimals)
@@ -29,13 +29,13 @@ async function sandwich(strategy: Strategy): Promise<SandwichResult> {
   return { bought, sold, victimOut, profit: sold - SANDWICH_SIZE }
 }
 
-async function shipNoDecayStrategy() {
-  const tokens = [NO_DECAY_STRATEGY.token0.address, NO_DECAY_STRATEGY.token1.address]
-  const amounts = [NO_DECAY_STRATEGY.shipped0, NO_DECAY_STRATEGY.shipped1]
+async function shipFresh(strategy: Strategy) {
+  const tokens = [strategy.token0.address, strategy.token1.address]
+  const amounts = [strategy.shipped0, strategy.shipped1]
   const call = {
     address: VAULT,
     abi: vaultAbi,
-    args: [NO_DECAY_STRATEGY.order, tokens, amounts],
+    args: [strategy.order, tokens, amounts],
     account: ACCOUNTS.curator,
     chain: base,
   } as const
@@ -56,12 +56,17 @@ async function inSnapshot<T>(run: () => Promise<T>): Promise<T> {
   return result.value
 }
 
-/** Runs the identical attack on both curves from the same state, and leaves the fork untouched. */
+/**
+ * Runs the identical attack on two new copies of the curve that differ only in decay, so past
+ * trading on the vault cannot skew the comparison. The fork is rewound after each.
+ */
 export async function compareSandwiches(): Promise<{ withoutDecay: SandwichResult; withDecay: SandwichResult }> {
-  const withoutDecay = await inSnapshot(async () => {
-    await shipNoDecayStrategy()
-    return sandwich(NO_DECAY_STRATEGY)
-  })
-  const withDecay = await inSnapshot(() => sandwich(VOLATILE_STRATEGY))
+  const attack = (strategy: Strategy) =>
+    inSnapshot(async () => {
+      await shipFresh(strategy)
+      return sandwich(strategy)
+    })
+  const withoutDecay = await attack(NO_DECAY_STRATEGY)
+  const withDecay = await attack(FRESH_DECAY_STRATEGY)
   return { withoutDecay, withDecay }
 }

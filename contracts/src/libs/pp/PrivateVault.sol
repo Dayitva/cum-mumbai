@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {PoseidonT3} from "./Poseidon.sol";
+import { PoseidonT3 } from "./Poseidon.sol";
 
 interface IVerifier {
     function verify(bytes calldata _proof, bytes32[] calldata _publicInputs) external returns (bool);
@@ -9,401 +9,109 @@ interface IVerifier {
 
 /**
  * @title PrivateVault
- * @notice Simplified private vault using ZK proofs for withdrawals with on-chain Merkle tree computation using Poseidon hash
- * @dev On-chain Merkle tree computation - deposits compute root on-chain, withdrawals verified with ZK proofs
+ * @notice Merkle tree of note commitments, spent by zero knowledge proof.
+ * @dev The contract keeps only the tree's right-hand frontier. There is deliberately no
+ * function that returns a Merkle path: asking an RPC node for your path tells it which
+ * deposit is yours. Clients rebuild the tree from PrivateDeposit events instead.
  */
 abstract contract PrivateVault {
-    // Root history to allow for multiple claims
-    uint256 public immutable ROOT_HISTORY_SIZE = 30;
+    uint256 public constant TREE_DEPTH = 20;
+    uint256 public constant ROOT_HISTORY_SIZE = 30;
+    uint256 internal constant FIELD_MODULUS =
+        21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
-    struct Vault {
-        uint256 currentLeafIndex;
-        uint256 denomination;
-        bytes32 currentRoot;
-        bytes32[] rootHistory;
-        mapping(bytes32 => bool) nullifierUsed;
-        mapping(bytes32 => bool) commitmentUsed;
-        mapping(bytes32 => bool) knownRoots;
-        // Merkle tree storage: level => index => hash
-        mapping(uint256 => mapping(uint256 => bytes32)) tree;
-        uint256 treeDepth;
-        uint256 depositCount;
-        uint256 withdrawalCount;
-    }
+    IVerifier public immutable verifier;
 
-    mapping(address => Vault) public vaults;
+    uint256 public nextLeafIndex;
+    uint256 public withdrawalCount;
+    bytes32 public currentRoot;
 
-    // Events
-    event NewVaultDenomination(address indexed token, uint256 newDenomination);
+    bytes32[TREE_DEPTH] private _frontier;
+    bytes32[ROOT_HISTORY_SIZE] private _rootHistory;
+    mapping(bytes32 root => bool) private _knownRoots;
+    mapping(bytes32 commitment => bool) public commitmentUsed;
+    mapping(bytes32 nullifierHash => bool) public nullifierUsed;
 
-    event PrivateDeposit(
-        bytes32 indexed commitment,
-        bytes32 indexed oldRoot,
-        bytes32 indexed newRoot,
-        uint256 leafIndex
-    );
+    event PrivateDeposit(bytes32 indexed commitment, uint256 leafIndex, bytes32 newRoot);
+    event PrivateWithdrawal(bytes32 indexed nullifierHash, address indexed recipient, address indexed relayer, uint256 fee);
 
-    event PrivateWithdrawal(
-        bytes32 indexed nullifierHash,
-        address indexed recipient,
-        bytes32 indexed merkleRoot
-    );
-
-    // Errors
-    error InvalidWithdrawalVerifier();
+    error InvalidVerifier();
     error InvalidCommitment();
     error CommitmentAlreadyUsed();
+    error TreeFull();
+    error UnknownRoot();
     error NullifierAlreadyUsed();
-    error InvalidWithdrawalProof();
-    error InvalidRecipient();
-    error InvalidRoot();
-    error InvalidLeafIndex();
+    error InvalidProof();
 
-    constructor(
-        uint256 _treeDepth,
-        bytes32[] memory _initialRoots,
-        address[] memory _tokenAddresses,
-        uint256[] memory _denominations
-    ) {
-        // Populate vaults
-        uint256 tokenAddressLen = _tokenAddresses.length;
-        for (uint256 i = 0; i < tokenAddressLen; ) {
-            address token = _tokenAddresses[i];
-            uint256 newDenomination = _denominations[i];
+    constructor(IVerifier verifier_) {
+        if (address(verifier_) == address(0)) revert InvalidVerifier();
+        verifier = verifier_;
+    }
 
-            Vault storage vault = vaults[token];
-            vault.denomination = newDenomination;
-            vault.treeDepth = _treeDepth;
-            bytes32 initialRoot = _initialRoots[i];
-            vault.currentRoot = initialRoot;
-            vault.rootHistory.push(initialRoot);
-            vault.knownRoots[initialRoot] = true;
+    function isKnownRoot(bytes32 root) public view returns (bool) {
+        return _knownRoots[root];
+    }
 
-            emit NewVaultDenomination(token, newDenomination);
+    /// @notice Notes that have been deposited and not yet withdrawn.
+    function activeNotes() public view returns (uint256) {
+        return nextLeafIndex - withdrawalCount;
+    }
 
-            // unlikely for overflow
-            unchecked {
-                ++i;
+    function _insertCommitment(bytes32 commitment) internal {
+        if (commitment == bytes32(0) || uint256(commitment) >= FIELD_MODULUS) revert InvalidCommitment();
+        if (commitmentUsed[commitment]) revert CommitmentAlreadyUsed();
+
+        uint256 leafIndex = nextLeafIndex;
+        if (leafIndex == 1 << TREE_DEPTH) revert TreeFull();
+
+        // Unfilled siblings are zero, which is what the circuit's test vectors and the fixtures assume.
+        uint256 node = uint256(commitment);
+        uint256 index = leafIndex;
+        for (uint256 level = 0; level < TREE_DEPTH; level++) {
+            if (index % 2 == 0) {
+                _frontier[level] = bytes32(node);
+                node = PoseidonT3.hash([node, 0]);
+            } else {
+                node = PoseidonT3.hash([uint256(_frontier[level]), node]);
             }
+            index /= 2;
         }
+
+        bytes32 newRoot = bytes32(node);
+        uint256 slot = leafIndex % ROOT_HISTORY_SIZE;
+        delete _knownRoots[_rootHistory[slot]];
+        _rootHistory[slot] = newRoot;
+        _knownRoots[newRoot] = true;
+
+        commitmentUsed[commitment] = true;
+        currentRoot = newRoot;
+        nextLeafIndex = leafIndex + 1;
+
+        emit PrivateDeposit(commitment, leafIndex, newRoot);
     }
 
-    /**
-     * @notice Internal function to handle private deposits.
-     * NOTE: Reentrancy protection should be applied in the derived contract.
-     * NOTE: Fund transfer mechanisms should be implemented in the derived contract
-     * You will need to handle the fixed denominations.
-     * @param token The token address being deposited. address(0) for ETH
-     * @param commitment The commitment being inserted hash(nullifier, secret)
-     */
-    function _privateDeposit(
-        address token,
-        bytes32 commitment
-    ) internal {
-        if (commitment == bytes32(0)) revert InvalidCommitment();
-
-        Vault storage vault = vaults[token];
-
-        if (vault.commitmentUsed[commitment]) revert CommitmentAlreadyUsed();
-
-        bytes32 oldRoot = vault.currentRoot;
-        uint256 leafIndex = vault.currentLeafIndex;
-
-        // Compute new root on-chain using Poseidon
-        bytes32 newRoot = _computeNewRoot(vault, commitment);
-
-        // Mark commitment as used
-        vault.commitmentUsed[commitment] = true;
-
-        // Update the Merkle root
-        _updateRoot(vault, newRoot);
-
-        // Increment deposit counter
-        ++vault.depositCount;
-
-        emit PrivateDeposit(commitment, oldRoot, newRoot, leafIndex);
-    }
-
-    /**
-     * @notice Internal function to handle private withdrawals h
-     * NOTE: Reentrancy protection should be applied in the derived contract.
-     * NOTE: Fund transfer mechanisms should be implemented in the derived contract.
-     * You will need to handle the fixed denominations.
-     * @dev Verifies ZK proof of commitment inclusion
-     * @param withdrawalVerifier The verifier contract to use for proof verification
-     * @param proof ZK proof from Noir withdrawal circuit
-     * @param token The token address being deposited. address(0) for ETH
-     * @param merkleRoot The Merkle root being proven against
-     * @param nullifierHash Hash of the nullifier (prevents double spending)
-     * @param recipient Address to receive the withdrawn funds
-     * @param relayer Address of the relayer (if any)
-     * @param fee Fee amount to pay the relayer
-     */
-    function _privateWithdraw(
-        IVerifier withdrawalVerifier,
+    function _spendNote(
         bytes calldata proof,
-        address token,
         bytes32 merkleRoot,
         bytes32 nullifierHash,
         address recipient,
         address relayer,
         uint256 fee
     ) internal {
-        if (address(withdrawalVerifier) == address(0)) revert InvalidWithdrawalVerifier();
+        if (!_knownRoots[merkleRoot]) revert UnknownRoot();
+        if (nullifierUsed[nullifierHash]) revert NullifierAlreadyUsed();
 
-        Vault storage vault = vaults[token];
-        if (vault.nullifierUsed[nullifierHash]) revert NullifierAlreadyUsed();
-        if (!vault.knownRoots[merkleRoot]) revert InvalidRoot();
-
-        // Verify the withdrawal proof
-        // Public inputs: (merkle_root, nullifier_hash, recipient)
         bytes32[] memory publicInputs = new bytes32[](5);
         publicInputs[0] = merkleRoot;
         publicInputs[1] = nullifierHash;
         publicInputs[2] = bytes32(uint256(uint160(recipient)));
         publicInputs[3] = bytes32(uint256(uint160(relayer)));
         publicInputs[4] = bytes32(fee);
+        if (!verifier.verify(proof, publicInputs)) revert InvalidProof();
 
-        if(!withdrawalVerifier.verify(proof, publicInputs)) revert InvalidWithdrawalProof();
+        nullifierUsed[nullifierHash] = true;
+        withdrawalCount++;
 
-        // Mark nullifier as spent
-        vault.nullifierUsed[nullifierHash] = true;
-
-        // Increment withdrawal counter
-        ++vault.withdrawalCount;
-
-        emit PrivateWithdrawal(nullifierHash, recipient, merkleRoot);
-    }
-
-    /**
-     * @notice change denomination of a given token in a vault to account for balance changes in a main vault
-     * @param token The token address
-     * @param newDenomination The new denomination
-     */
-    function setDenomination(address token, uint256 newDenomination) internal {
-        Vault storage vault = vaults[token];
-        vault.denomination = newDenomination;
-        emit NewVaultDenomination(token, newDenomination);
-    }
-
-    /**
-     * @notice get denomination of a given token in a vault
-     */
-    function getDenomination(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.denomination;
-    }
-
-    /**
-     * @notice Check if a nullifier has been spent
-     * @param token The token address
-     * @param nullifierHash The nullifier hash to check
-     */
-    function isNullifierUsed(address token, bytes32 nullifierHash) public view returns (bool) {
-        Vault storage vault = vaults[token];
-        return vault.nullifierUsed[nullifierHash];
-    }
-
-    /**
-     * @notice Check if a commitment has been used
-     * @param token The token address
-     * @param commitment The commitment to check
-     */
-    function isCommitmentUsed(address token, bytes32 commitment) public view returns (bool) {
-        Vault storage vault = vaults[token];
-        return vault.commitmentUsed[commitment];
-    }
-
-    /**
-     * @notice Helper for Merkle Logic. Check if a root is known (current or recent)
-     * @param token The token address
-     * @param _root The Merkle root to check
-     */
-    function isKnownRoot(address token, bytes32 _root) public view returns (bool) {
-        Vault storage vault = vaults[token];
-        return vault.knownRoots[_root];
-    }
-
-    /**
-     * @notice Helper for Merkle Logic. Get the current Merkle root for a given token
-     * @param token The token address
-     */
-    function getCurrentRoot(address token) public view returns (bytes32) {
-        Vault storage vault = vaults[token];
-        return vault.currentRoot;
-    }
-
-    /**
-     * @notice Helper for Merkle Logic. Get the current leaf index
-     * @param token The token address
-     */
-    function getCurrentLeafIndex(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.currentLeafIndex;
-    }
-
-    /**
-     * @notice Helper for Merkle Logic. Get the number of stored roots
-     * @param token The token address
-     */
-    function getRootHistoryLength(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.rootHistory.length;
-    }
-
-    /**
-     * @notice Get the total number of deposits for a given token
-     * @param token The token address
-     */
-    function getDepositCount(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.depositCount;
-    }
-
-    /**
-     * @notice Get the total number of withdrawals for a given token
-     * @param token The token address
-     */
-    function getWithdrawalCount(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.withdrawalCount;
-    }
-
-    /**
-     * @notice Get active deposit count for a given token
-     * @param token The token address
-     */
-    function getActiveDepositCount(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.depositCount - vault.withdrawalCount;
-    }
-
-    /**
-     * @notice Get a node from the Merkle tree
-     * @param token The token address
-     * @param level The level in the tree (0 = leaves)
-     * @param index The index at that level
-     * @return The hash value at that position
-     */
-    function getTreeNode(address token, uint256 level, uint256 index) public view returns (bytes32) {
-        Vault storage vault = vaults[token];
-        return vault.tree[level][index];
-    }
-
-    /**
-     * @notice Get the tree depth for a token's vault
-     * @param token The token address
-     */
-    function getTreeDepth(address token) public view returns (uint256) {
-        Vault storage vault = vaults[token];
-        return vault.treeDepth;
-    }
-
-    /**
-     * @notice Get the Merkle path for a given leaf index
-     * @param token The token address
-     * @param leafIndex The index of the leaf
-     * @return pathIndices Array of 0s (left) and 1s (right) indicating the path
-     * @return pathElements Array of sibling hashes along the path
-     */
-    function getMerklePath(
-        address token,
-        uint256 leafIndex
-    ) public view returns (uint256[] memory pathIndices, bytes32[] memory pathElements) {
-        Vault storage vault = vaults[token];
-        uint256 depth = vault.treeDepth;
-
-        pathIndices = new uint256[](depth);
-        pathElements = new bytes32[](depth);
-
-        uint256 currentIndex = leafIndex;
-
-        for (uint256 level = 0; level < depth; level++) {
-            uint256 siblingIndex;
-
-            if (currentIndex % 2 == 0) {
-                // Current is left child, sibling is right
-                pathIndices[level] = 0;
-                siblingIndex = currentIndex + 1;
-            } else {
-                // Current is right child, sibling is left
-                pathIndices[level] = 1;
-                siblingIndex = currentIndex - 1;
-            }
-
-            pathElements[level] = vault.tree[level][siblingIndex];
-            currentIndex = currentIndex / 2;
-        }
-
-        return (pathIndices, pathElements);
-    }
-
-
-    /**
-     * @notice Compute new Merkle root by inserting a leaf at the current leaf index
-     * @param vault The vault struct
-     * @param _leaf The leaf value (commitment) to insert
-     * @return The new Merkle root
-     */
-    function _computeNewRoot(Vault storage vault, bytes32 _leaf) internal returns (bytes32) {
-        uint256 leafIndex = vault.currentLeafIndex;
-
-        // Store the leaf at level 0
-        vault.tree[0][leafIndex] = _leaf;
-
-        bytes32 currentHash = _leaf;
-        uint256 currentIndex = leafIndex;
-
-        // Hash up the tree
-        for (uint256 level = 0; level < vault.treeDepth; level++) {
-            bytes32 left;
-            bytes32 right;
-
-            if (currentIndex % 2 == 0) {
-                // Current node is left child
-                left = currentHash;
-                right = vault.tree[level][currentIndex + 1];
-            } else {
-                // Current node is right child
-                left = vault.tree[level][currentIndex - 1];
-                right = currentHash;
-            }
-
-            // Compute parent hash using PoseidonT3
-            uint[2] memory inputs = [uint256(left), uint256(right)];
-            currentHash = bytes32(PoseidonT3.hash(inputs));
-
-            // Move to parent level
-            currentIndex = currentIndex / 2;
-
-            // Store the hash at the next level
-            vault.tree[level + 1][currentIndex] = currentHash;
-        }
-
-        return currentHash;
-    }
-
-    /**
-     * @notice Helper for Merkle Logic. Update the Merkle root after computing on-chain
-     * @param vault The vault struct
-     * @param _newRoot The new Merkle root
-     */
-    function _updateRoot(Vault storage vault, bytes32 _newRoot) internal {
-        if (_newRoot == bytes32(0)) revert InvalidRoot();
-
-        // Update current root
-        vault.currentRoot = _newRoot;
-        vault.knownRoots[_newRoot] = true;
-
-        // Add to history
-        vault.rootHistory.push(_newRoot);
-
-        // Keep only last ROOT_HISTORY_SIZE roots
-        if (vault.rootHistory.length > ROOT_HISTORY_SIZE) {
-            bytes32 expiredRoot = vault.rootHistory[vault.rootHistory.length - ROOT_HISTORY_SIZE - 1];
-            delete vault.knownRoots[expiredRoot];
-        }
-
-        ++vault.currentLeafIndex;
+        emit PrivateWithdrawal(nullifierHash, recipient, relayer, fee);
     }
 }

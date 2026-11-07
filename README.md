@@ -63,5 +63,6 @@ cd contracts && forge test
 
 ## Licences
 
-`contracts/` is MIT, except the generated verifier (Apache-2.0). Aqua is a dependency under its own
+MIT (see `LICENSE`), with the agreement of the Buenos Aires team. The generated verifier
+`contracts/src/verifier/HonkVerifier.sol` is Apache-2.0. Aqua is a dependency under its own
 source-available licence.

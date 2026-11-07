@@ -3,7 +3,7 @@ solc = "0.8.30"
 optimizer_runs = 200
 via_ir = true
 libs = ["lib"]
-fs_permissions = [{ access = "read", path = "../circuits/target" }, { access = "read", path = "./test/fixtures" }]
+fs_permissions = [{ access = "write", path = "../circuits/fixtures" }, { access = "read", path = "./test/fixtures" }]
 
 [fmt]
 single_line_statement_blocks = "multi"
@@ -12,3 +12,14 @@ override_spacing = false
 bracket_spacing = true
 int_types = "long"
 number_underscore = "thousands"
+
+# The generated verifier's assembly does not compile under via_ir.
+[[profile.default.additional_compiler_profiles]]
+name = "verifier"
+via_ir = false
+optimizer = true
+optimizer_runs = 1
+
+[[profile.default.compilation_restrictions]]
+paths = "src/verifier/*"
+via_ir = false

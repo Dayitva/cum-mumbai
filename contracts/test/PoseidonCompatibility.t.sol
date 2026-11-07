@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import {PoseidonT3} from "../src/Poseidon.sol";
+import {PoseidonT3} from "../src/libs/pp/Poseidon.sol";
 
 /**
  * @title PoseidonCompatibility

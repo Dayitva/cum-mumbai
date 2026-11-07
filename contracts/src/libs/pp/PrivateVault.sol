@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { PoseidonT3 } from "./Poseidon.sol";
-
 interface IVerifier {
     function verify(bytes calldata _proof, bytes32[] calldata _publicInputs) external returns (bool);
+}
+
+/// The deployed PoseidonT3 library. Called through an interface so that the vault and the
+/// library can be compiled with different settings.
+interface IPoseidonT3 {
+    function hash(uint256[2] memory input) external pure returns (uint256);
 }
 
 /**
@@ -21,6 +25,7 @@ abstract contract PrivateVault {
         21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
     IVerifier public immutable verifier;
+    IPoseidonT3 public immutable poseidon;
 
     uint256 public nextLeafIndex;
     uint256 public withdrawalCount;
@@ -43,9 +48,10 @@ abstract contract PrivateVault {
     error NullifierAlreadyUsed();
     error InvalidProof();
 
-    constructor(IVerifier verifier_) {
+    constructor(IVerifier verifier_, IPoseidonT3 poseidon_) {
         if (address(verifier_) == address(0)) revert InvalidVerifier();
         verifier = verifier_;
+        poseidon = poseidon_;
     }
 
     function isKnownRoot(bytes32 root) public view returns (bool) {
@@ -70,9 +76,9 @@ abstract contract PrivateVault {
         for (uint256 level = 0; level < TREE_DEPTH; level++) {
             if (index % 2 == 0) {
                 _frontier[level] = bytes32(node);
-                node = PoseidonT3.hash([node, 0]);
+                node = poseidon.hash([node, 0]);
             } else {
-                node = PoseidonT3.hash([uint256(_frontier[level]), node]);
+                node = poseidon.hash([uint256(_frontier[level]), node]);
             }
             index /= 2;
         }

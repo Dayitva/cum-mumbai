@@ -7,8 +7,10 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { IAqua } from "aqua/contracts/interfaces/IAqua.sol";
-import { ISwapLock } from "./interfaces/ISwapLock.sol";
-import { IVerifier, PrivateVault } from "./libs/pp/PrivateVault.sol";
+import { IMakerHooks } from "swap-vm/interfaces/IMakerHooks.sol";
+import { ISwapVM } from "swap-vm/interfaces/ISwapVM.sol";
+import { MakerTraits, MakerTraitsLib } from "swap-vm/libs/MakerTraits.sol";
+import { IPoseidonT3, IVerifier, PrivateVault } from "./libs/pp/PrivateVault.sol";
 
 /**
  * @title AquaVault
@@ -24,34 +26,48 @@ import { IVerifier, PrivateVault } from "./libs/pp/PrivateVault.sol";
  * withdrawals their virtual depth can overstate what the vault holds; swaps that exceed the
  * real balance revert, and the curator can dock and ship a resized strategy.
  *
- * An Aqua app can pull a strategy's whole virtual balance, so a strategy is a trust decision.
- * Shipping one is delayed by `strategyDelay`, which gives anyone who objects time to withdraw.
+ * Strategies are SwapVM programs run by one router fixed at deployment. A program decides how
+ * much of the vault's virtual balances a taker can have, so a strategy is a trust decision:
+ * shipping one is delayed by `strategyDelay`, which gives anyone who objects time to withdraw.
+ *
+ * Shares cannot be priced while a swap is part-way through, because the vault's balances are
+ * wrong between Aqua's pull and push. Every strategy must therefore call the vault's maker
+ * hooks, and the vault refuses deposits and withdrawals until the hooks say the swap is done.
+ * This relies on tokens being plain ERC20s, with no transfer callbacks.
  */
-contract AquaVault is PrivateVault, ReentrancyGuard, Ownable {
+contract AquaVault is PrivateVault, ReentrancyGuard, Ownable, IMakerHooks {
     using SafeERC20 for IERC20;
 
     uint256 public constant MAX_TOKENS = 8;
-    uint256 public constant MAX_ACTIVE_STRATEGIES = 16;
     uint256 public constant FEE_BASE = 1e18;
 
-    struct ActiveStrategy {
-        ISwapLock app;
-        bytes32 strategyHash;
-    }
+    uint256 private constant REQUIRED_TRAITS = MakerTraitsLib.USE_AQUA_INSTEAD_OF_SIGNATURE_BIT_FLAG
+        | MakerTraitsLib.HAS_PRE_TRANSFER_IN_HOOK_BIT_FLAG
+        | MakerTraitsLib.HAS_POST_TRANSFER_IN_HOOK_BIT_FLAG
+        | MakerTraitsLib.HAS_PRE_TRANSFER_OUT_HOOK_BIT_FLAG
+        | MakerTraitsLib.HAS_POST_TRANSFER_OUT_HOOK_BIT_FLAG;
+    uint256 private constant FORBIDDEN_TRAITS = MakerTraitsLib.SHOULD_UNWRAP_BIT_FLAG
+        | MakerTraitsLib.PRE_TRANSFER_IN_HOOK_HAS_TARGET
+        | MakerTraitsLib.POST_TRANSFER_IN_HOOK_HAS_TARGET
+        | MakerTraitsLib.PRE_TRANSFER_OUT_HOOK_HAS_TARGET
+        | MakerTraitsLib.POST_TRANSFER_OUT_HOOK_HAS_TARGET;
 
     IAqua public immutable aqua;
+    address public immutable router;
     uint256 public immutable strategyDelay;
 
     address[] private _tokens;
     uint256[] private _initialAmounts;
-    ActiveStrategy[] private _activeStrategies;
+    uint256 private transient _swapsInFlight;
+
+    mapping(bytes32 orderHash => bool) public isActiveStrategy;
 
     /// @notice When a proposed strategy may be shipped, keyed by the hash of its whole configuration.
     mapping(bytes32 proposalId => uint256 shippableAt) public proposals;
 
     event NoteDeposited(bytes32 indexed commitment, uint256[] amounts);
     event NoteWithdrawn(bytes32 indexed nullifierHash, uint256[] amounts);
-    event StrategyProposed(bytes32 indexed proposalId, address indexed app, bytes strategy, address[] tokens, uint256[] amounts, uint256 shippableAt);
+    event StrategyProposed(bytes32 indexed proposalId, ISwapVM.Order order, address[] tokens, uint256[] amounts, uint256 shippableAt);
     event StrategyCancelled(bytes32 indexed proposalId);
 
     error InvalidTokens();
@@ -63,30 +79,38 @@ contract AquaVault is PrivateVault, ReentrancyGuard, Ownable {
     error AlreadyProposed();
     error NotProposed();
     error StrategyDelayPending(uint256 shippableAt);
-    error TooManyStrategies();
+    error InvalidStrategy();
     error StrategyNotActive();
+    error NotFromActiveStrategy();
 
-    /// Rejects share pricing while any of the vault's strategies is part-way through a swap.
     modifier noSwapInFlight() {
-        uint256 count = _activeStrategies.length;
-        for (uint256 i = 0; i < count; i++) {
-            ActiveStrategy storage active = _activeStrategies[i];
-            if (active.app.isSwapping(address(this), active.strategyHash)) revert SwapInFlight();
+        if (_swapsInFlight != 0) revert SwapInFlight();
+        _;
+    }
+
+    /// Only the router, running a shipped strategy of this vault, can move the swap counter.
+    /// Otherwise a taker could call a post hook mid-swap and clear the guard.
+    modifier onlyActiveStrategy(address maker, bytes32 orderHash) {
+        if (msg.sender != router || maker != address(this) || !isActiveStrategy[orderHash]) {
+            revert NotFromActiveStrategy();
         }
         _;
     }
 
     constructor(
         IAqua aqua_,
+        address router_,
         IVerifier verifier_,
+        IPoseidonT3 poseidon_,
         address[] memory tokens_,
         uint256[] memory initialAmounts_,
         uint256 strategyDelay_
-    ) PrivateVault(verifier_) Ownable(msg.sender) {
+    ) PrivateVault(verifier_, poseidon_) Ownable(msg.sender) {
         if (tokens_.length == 0 || tokens_.length > MAX_TOKENS) revert InvalidTokens();
         if (tokens_.length != initialAmounts_.length) revert InvalidAmounts();
 
         aqua = aqua_;
+        router = router_;
         strategyDelay = strategyDelay_;
         _tokens = tokens_;
         _initialAmounts = initialAmounts_;
@@ -99,10 +123,6 @@ contract AquaVault is PrivateVault, ReentrancyGuard, Ownable {
 
     function tokens() external view returns (address[] memory) {
         return _tokens;
-    }
-
-    function activeStrategies() external view returns (ActiveStrategy[] memory) {
-        return _activeStrategies;
     }
 
     /// @notice What one note costs right now.
@@ -173,18 +193,19 @@ contract AquaVault is PrivateVault, ReentrancyGuard, Ownable {
 
     /// @notice Announce a strategy. It can be shipped once `strategyDelay` has passed.
     function proposeStrategy(
-        ISwapLock app,
-        bytes calldata strategy,
+        ISwapVM.Order calldata order,
         address[] calldata strategyTokens,
         uint256[] calldata amounts
     ) external onlyOwner returns (bytes32 proposalId) {
-        proposalId = _proposalId(app, strategy, strategyTokens, amounts);
+        _requireHooksWired(order);
+
+        proposalId = _proposalId(order, strategyTokens, amounts);
         if (proposals[proposalId] != 0) revert AlreadyProposed();
 
         uint256 shippableAt = block.timestamp + strategyDelay;
         proposals[proposalId] = shippableAt;
 
-        emit StrategyProposed(proposalId, address(app), strategy, strategyTokens, amounts, shippableAt);
+        emit StrategyProposed(proposalId, order, strategyTokens, amounts, shippableAt);
     }
 
     function cancelStrategy(bytes32 proposalId) external onlyOwner {
@@ -195,43 +216,69 @@ contract AquaVault is PrivateVault, ReentrancyGuard, Ownable {
 
     /// @notice Give a proposed strategy its virtual balances once its delay has passed.
     function ship(
-        ISwapLock app,
-        bytes calldata strategy,
+        ISwapVM.Order calldata order,
         address[] calldata strategyTokens,
         uint256[] calldata amounts
     ) external onlyOwner returns (bytes32 strategyHash) {
-        bytes32 proposalId = _proposalId(app, strategy, strategyTokens, amounts);
+        bytes32 proposalId = _proposalId(order, strategyTokens, amounts);
         uint256 shippableAt = proposals[proposalId];
         if (shippableAt == 0) revert NotProposed();
         if (block.timestamp < shippableAt) revert StrategyDelayPending(shippableAt);
-        if (_activeStrategies.length == MAX_ACTIVE_STRATEGIES) revert TooManyStrategies();
 
         delete proposals[proposalId];
-        strategyHash = aqua.ship(address(app), strategy, strategyTokens, amounts);
-        _activeStrategies.push(ActiveStrategy(app, strategyHash));
+        strategyHash = aqua.ship(router, abi.encode(order), strategyTokens, amounts);
+        isActiveStrategy[strategyHash] = true;
     }
 
     /// @notice Close a strategy. Not delayed, because closing can only reduce what is at risk.
-    function dock(ISwapLock app, bytes32 strategyHash, address[] calldata strategyTokens) external onlyOwner {
-        uint256 count = _activeStrategies.length;
-        for (uint256 i = 0; i < count; i++) {
-            ActiveStrategy storage active = _activeStrategies[i];
-            if (active.app == app && active.strategyHash == strategyHash) {
-                _activeStrategies[i] = _activeStrategies[count - 1];
-                _activeStrategies.pop();
-                aqua.dock(address(app), strategyHash, strategyTokens);
-                return;
-            }
-        }
-        revert StrategyNotActive();
+    function dock(bytes32 strategyHash, address[] calldata strategyTokens) external onlyOwner {
+        if (!isActiveStrategy[strategyHash]) revert StrategyNotActive();
+        delete isActiveStrategy[strategyHash];
+        aqua.dock(router, strategyHash, strategyTokens);
+    }
+
+    function preTransferIn(address maker, address, address, address, uint256, uint256, bytes32 orderHash, bytes calldata, bytes calldata)
+        external
+        onlyActiveStrategy(maker, orderHash)
+    {
+        _swapsInFlight++;
+    }
+
+    function postTransferIn(address maker, address, address, address, uint256, uint256, bytes32 orderHash, bytes calldata, bytes calldata)
+        external
+        onlyActiveStrategy(maker, orderHash)
+    {
+        _swapsInFlight--;
+    }
+
+    function preTransferOut(address maker, address, address, address, uint256, uint256, bytes32 orderHash, bytes calldata, bytes calldata)
+        external
+        onlyActiveStrategy(maker, orderHash)
+    {
+        _swapsInFlight++;
+    }
+
+    function postTransferOut(address maker, address, address, address, uint256, uint256, bytes32 orderHash, bytes calldata, bytes calldata)
+        external
+        onlyActiveStrategy(maker, orderHash)
+    {
+        _swapsInFlight--;
+    }
+
+    function _requireHooksWired(ISwapVM.Order calldata order) private view {
+        uint256 traits = MakerTraits.unwrap(order.traits);
+        if (
+            order.maker != address(this)
+                || traits & REQUIRED_TRAITS != REQUIRED_TRAITS
+                || traits & FORBIDDEN_TRAITS != 0
+        ) revert InvalidStrategy();
     }
 
     function _proposalId(
-        ISwapLock app,
-        bytes calldata strategy,
+        ISwapVM.Order calldata order,
         address[] calldata strategyTokens,
         uint256[] calldata amounts
     ) private pure returns (bytes32) {
-        return keccak256(abi.encode(app, strategy, strategyTokens, amounts));
+        return keccak256(abi.encode(order, strategyTokens, amounts));
     }
 }

@@ -5,14 +5,15 @@ import "forge-std/Test.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Aqua } from "aqua/contracts/Aqua.sol";
-import { IAqua } from "aqua/contracts/interfaces/IAqua.sol";
-import { IXYCSwapCallback } from "aqua/examples/apps/interfaces/IXYCSwapCallback.sol";
-import { XYCSwap } from "aqua/examples/apps/XYCSwap.sol";
-import { CumXYCSwap } from "../src/apps/CumXYCSwap.sol";
+import { XYCConcentrateArgsBuilder } from "swap-vm/instructions/XYCConcentrate.sol";
+import { ITakerCallbacks } from "swap-vm/interfaces/ITakerCallbacks.sol";
+import { ISwapVM } from "swap-vm/interfaces/ISwapVM.sol";
+import { MakerTraits, MakerTraitsLib } from "swap-vm/libs/MakerTraits.sol";
+import { TakerTraitsLib } from "swap-vm/libs/TakerTraits.sol";
+import { AquaSwapVMRouter } from "swap-vm/routers/AquaSwapVMRouter.sol";
+import { CumPrograms } from "../script/CumPrograms.sol";
 import { AquaVault } from "../src/AquaVault.sol";
-import { ISwapLock } from "../src/interfaces/ISwapLock.sol";
-import { PoseidonT3 } from "../src/libs/pp/Poseidon.sol";
-import { IVerifier, PrivateVault } from "../src/libs/pp/PrivateVault.sol";
+import { IPoseidonT3, IVerifier, PrivateVault } from "../src/libs/pp/PrivateVault.sol";
 
 contract TestToken is ERC20 {
     constructor(string memory symbol) ERC20(symbol, symbol) {}
@@ -22,105 +23,163 @@ contract TestToken is ERC20 {
     }
 }
 
-/// Pays for swaps from its own balance, and can act on the vault mid-swap.
-contract Taker is IXYCSwapCallback {
-    IAqua internal immutable aqua;
-    AquaVault internal vault;
-    bytes32 public depositDuringSwap;
+/// Trades through the router, and can act on the vault from inside a swap.
+contract Taker is ITakerCallbacks {
+    enum Attack {
+        None,
+        Deposit,
+        Withdraw
+    }
 
-    constructor(IAqua aqua_, AquaVault vault_) {
-        aqua = aqua_;
+    AquaSwapVMRouter internal immutable router;
+    AquaVault internal immutable vault;
+    Attack internal attack;
+    bytes32 internal attackCommitment;
+    bytes internal attackProof;
+    bytes32[] internal attackInputs;
+
+    constructor(AquaSwapVMRouter router_, AquaVault vault_) {
+        router = router_;
         vault = vault_;
     }
 
-    function setDepositDuringSwap(bytes32 commitment) external {
-        depositDuringSwap = commitment;
+    function attackWithDeposit(bytes32 commitment) external {
+        attack = Attack.Deposit;
+        attackCommitment = commitment;
     }
 
-    function swap(XYCSwap app, XYCSwap.Strategy calldata strategy, bool zeroForOne, uint256 amountIn)
+    function attackWithWithdraw(bytes calldata proof, bytes32[] calldata inputs) external {
+        attack = Attack.Withdraw;
+        attackProof = proof;
+        attackInputs = inputs;
+    }
+
+    function swap(ISwapVM.Order calldata order, address tokenIn, address tokenOut, uint256 amountIn, bool takerPaysFirst)
         external
-        returns (uint256)
+        returns (uint256 amountOut)
     {
-        return app.swapExactIn(strategy, zeroForOne, amountIn, 0, address(this), "");
+        IERC20(tokenIn).approve(address(router), amountIn);
+        bytes memory takerData = TakerTraitsLib.build(TakerTraitsLib.Args({
+            taker: address(this),
+            isExactIn: true,
+            shouldUnwrapWeth: false,
+            isStrictThresholdAmount: false,
+            isFirstTransferFromTaker: takerPaysFirst,
+            useTransferFromAndAquaPush: true,
+            threshold: "",
+            to: address(0),
+            deadline: 0,
+            hasPreTransferInCallback: attack != Attack.None,
+            hasPreTransferOutCallback: attack != Attack.None,
+            preTransferInHookData: "",
+            postTransferInHookData: "",
+            preTransferOutHookData: "",
+            postTransferOutHookData: "",
+            preTransferInCallbackData: "",
+            preTransferOutCallbackData: "",
+            instructionsArgs: "",
+            signature: ""
+        }));
+        (, amountOut, ) = router.swap(order, tokenIn, tokenOut, amountIn, takerData);
     }
 
-    function xycSwapCallback(
-        address tokenIn,
-        address,
-        uint256 amountIn,
-        uint256,
-        address maker,
-        address app,
-        bytes32 strategyHash,
-        bytes calldata
-    ) external {
-        if (depositDuringSwap != bytes32(0)) {
+    function preTransferInCallback(address, address, address, address, uint256, uint256, bytes32, bytes calldata)
+        external
+    {
+        _attack();
+    }
+
+    function preTransferOutCallback(address, address, address, address, uint256, uint256, bytes32, bytes calldata)
+        external
+    {
+        _attack();
+    }
+
+    function _attack() internal {
+        if (attack == Attack.Deposit) {
             address[] memory tokens = vault.tokens();
             uint256[] memory maxAmounts = new uint256[](tokens.length);
             for (uint256 i = 0; i < tokens.length; i++) {
                 maxAmounts[i] = type(uint256).max;
                 IERC20(tokens[i]).approve(address(vault), type(uint256).max);
             }
-            vault.deposit(depositDuringSwap, maxAmounts);
+            vault.deposit(attackCommitment, maxAmounts);
+        } else if (attack == Attack.Withdraw) {
+            vault.withdraw(
+                attackProof,
+                attackInputs[0],
+                attackInputs[1],
+                address(uint160(uint256(attackInputs[2]))),
+                address(uint160(uint256(attackInputs[3]))),
+                uint256(attackInputs[4])
+            );
         }
-        IERC20(tokenIn).approve(address(aqua), amountIn);
-        aqua.push(maker, app, strategyHash, tokenIn, amountIn);
     }
 }
 
 contract AquaVaultTest is Test {
     uint256 internal constant DELAY = 2 days;
-    uint256 internal constant SHARE0 = 1_000e18;
-    uint256 internal constant SHARE1 = 2_000e18;
-    uint256 internal constant FEE_BPS = 30;
+    uint256 internal constant SHARE = 1_000e18;
+    uint32 internal constant FEE_BPS = 30;
+    uint16 internal constant DECAY = 300;
 
     address internal constant RECIPIENT = address(0xA1);
     address internal constant RELAYER = address(0xB2);
 
     Aqua internal aqua;
-    CumXYCSwap internal app;
+    AquaSwapVMRouter internal router;
+    CumPrograms internal programs;
+    IPoseidonT3 internal poseidon;
     AquaVault internal vault;
-    TestToken internal token0;
-    TestToken internal token1;
+    TestToken internal stableA;
+    TestToken internal stableB;
+    TestToken internal volatileToken;
     Taker internal taker;
-    address[] internal pair;
     address internal lp = makeAddr("lp");
 
-    bytes32 internal commitment0 = _hash(11111111, 22222222);
-    bytes32 internal commitment1 = _hash(33333333, 44444444);
+    bytes32 internal commitment0;
+    bytes32 internal commitment1;
+    uint64 internal nextSalt = 1;
 
     function setUp() public {
         aqua = new Aqua();
-        app = new CumXYCSwap(aqua);
-        token0 = new TestToken("TK0");
-        token1 = new TestToken("TK1");
-        pair.push(address(token0));
-        pair.push(address(token1));
+        router = new AquaSwapVMRouter(address(aqua), address(0), address(this), "SwapVM", "1.0.0");
+        programs = new CumPrograms(address(aqua));
+        poseidon = IPoseidonT3(deployCode("Poseidon.sol:PoseidonT3"));
+        commitment0 = bytes32(poseidon.hash([uint256(11111111), 22222222]));
+        commitment1 = bytes32(poseidon.hash([uint256(33333333), 44444444]));
 
-        uint256[] memory share = new uint256[](2);
-        share[0] = SHARE0;
-        share[1] = SHARE1;
-        vault = new AquaVault(aqua, IVerifier(deployCode("HonkVerifier.sol:HonkVerifier")), pair, share, DELAY);
-        taker = new Taker(aqua, vault);
+        stableA = new TestToken("STA");
+        stableB = new TestToken("STB");
+        volatileToken = new TestToken("VOL");
 
-        token0.mint(lp, 1_000_000e18);
-        token1.mint(lp, 1_000_000e18);
-        token0.mint(address(taker), 1_000_000e18);
-        token1.mint(address(taker), 1_000_000e18);
-        vm.startPrank(lp);
-        token0.approve(address(vault), type(uint256).max);
-        token1.approve(address(vault), type(uint256).max);
-        vm.stopPrank();
-    }
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(stableA);
+        tokens[1] = address(stableB);
+        tokens[2] = address(volatileToken);
+        uint256[] memory share = new uint256[](3);
+        share[0] = SHARE;
+        share[1] = SHARE;
+        share[2] = SHARE;
+        vault = new AquaVault(
+            aqua, address(router), IVerifier(deployCode("HonkVerifier.sol:HonkVerifier")), poseidon, tokens, share, DELAY
+        );
+        taker = new Taker(router, vault);
 
-    function _hash(uint256 a, uint256 b) internal pure returns (bytes32) {
-        return bytes32(PoseidonT3.hash([a, b]));
+        for (uint256 i = 0; i < tokens.length; i++) {
+            TestToken token = TestToken(tokens[i]);
+            token.mint(lp, 1_000_000e18);
+            token.mint(address(taker), 1_000_000e18);
+            vm.prank(lp);
+            token.approve(address(vault), type(uint256).max);
+        }
     }
 
     function _noMax() internal pure returns (uint256[] memory maxAmounts) {
-        maxAmounts = new uint256[](2);
+        maxAmounts = new uint256[](3);
         maxAmounts[0] = type(uint256).max;
         maxAmounts[1] = type(uint256).max;
+        maxAmounts[2] = type(uint256).max;
     }
 
     function _deposit(bytes32 commitment) internal {
@@ -146,23 +205,65 @@ contract AquaVaultTest is Test {
         );
     }
 
-    function _shipStrategy(uint256 amount0, uint256 amount1) internal returns (XYCSwap.Strategy memory strategy) {
-        strategy = XYCSwap.Strategy(address(vault), address(token0), address(token1), FEE_BPS, bytes32(amount0));
+    function _ship(ISwapVM.Order memory order, address token0, address token1, uint256 amount0, uint256 amount1)
+        internal
+    {
+        address[] memory tokens = new address[](2);
+        tokens[0] = token0;
+        tokens[1] = token1;
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = amount0;
         amounts[1] = amount1;
-        bytes memory encoded = abi.encode(strategy);
-        vault.proposeStrategy(app, encoded, pair, amounts);
+        vault.proposeStrategy(order, tokens, amounts);
         skip(DELAY);
-        vault.ship(app, encoded, pair, amounts);
+        vault.ship(order, tokens, amounts);
+    }
+
+    function _shipVolatile(uint256 amountEach, uint16 decayPeriod, uint32 feeBps)
+        internal
+        returns (ISwapVM.Order memory order)
+    {
+        // Symmetric bounds around a spot of 1 need equal amounts, whichever token sorts first.
+        order = programs.order(
+            address(vault), programs.volatilePair(0.8e18, 1.25e18, decayPeriod, feeBps, nextSalt++)
+        );
+        _ship(order, address(stableA), address(volatileToken), amountEach, amountEach);
+    }
+
+    function _shipPegged(uint256 amountEach) internal returns (ISwapVM.Order memory order) {
+        order = programs.order(address(vault), programs.peggedPair(amountEach, amountEach, 100e27, 1, nextSalt++));
+        _ship(order, address(stableA), address(stableB), amountEach, amountEach);
+    }
+
+    function _roundTripVolatile(ISwapVM.Order memory order, uint256 amountIn) internal {
+        uint256 out = taker.swap(order, address(stableA), address(volatileToken), amountIn, true);
+        skip(DECAY);
+        taker.swap(order, address(volatileToken), address(stableA), out, true);
+        skip(DECAY);
+    }
+
+    /// Attacker buys, victim buys, attacker sells. Returns what the attacker gained or lost.
+    function _sandwich(ISwapVM.Order memory order) internal returns (int256 profit) {
+        address tokenIn = address(stableA);
+        address tokenOut = address(volatileToken);
+        Taker attacker = new Taker(router, vault);
+        Taker victim = new Taker(router, vault);
+        stableA.mint(address(attacker), 200e18);
+        stableA.mint(address(victim), 200e18);
+
+        uint256 bought = attacker.swap(order, tokenIn, tokenOut, 200e18, true);
+        victim.swap(order, tokenIn, tokenOut, 200e18, true);
+        uint256 sold = attacker.swap(order, tokenOut, tokenIn, bought, true);
+        profit = int256(sold) - int256(200e18);
     }
 
     // Deposits
 
     function test_firstDepositPaysInitialAmounts() public {
         _deposit(commitment0);
-        assertEq(token0.balanceOf(address(vault)), SHARE0);
-        assertEq(token1.balanceOf(address(vault)), SHARE1);
+        assertEq(stableA.balanceOf(address(vault)), SHARE);
+        assertEq(stableB.balanceOf(address(vault)), SHARE);
+        assertEq(volatileToken.balanceOf(address(vault)), SHARE);
         assertEq(vault.activeNotes(), 1);
     }
 
@@ -177,9 +278,9 @@ contract AquaVaultTest is Test {
 
     function test_depositRespectsMaxAmounts() public {
         uint256[] memory maxAmounts = _noMax();
-        maxAmounts[1] = SHARE1 - 1;
+        maxAmounts[1] = SHARE - 1;
         vm.prank(lp);
-        vm.expectRevert(abi.encodeWithSelector(AquaVault.AmountAboveMax.selector, address(token1), SHARE1, SHARE1 - 1));
+        vm.expectRevert(abi.encodeWithSelector(AquaVault.AmountAboveMax.selector, address(stableB), SHARE, SHARE - 1));
         vault.deposit(commitment0, maxAmounts);
     }
 
@@ -214,8 +315,9 @@ contract AquaVaultTest is Test {
 
         _withdraw("note0");
 
-        assertEq(token0.balanceOf(RECIPIENT), SHARE0);
-        assertEq(token1.balanceOf(RECIPIENT), SHARE1);
+        assertEq(stableA.balanceOf(RECIPIENT), SHARE);
+        assertEq(stableB.balanceOf(RECIPIENT), SHARE);
+        assertEq(volatileToken.balanceOf(RECIPIENT), SHARE);
         assertEq(vault.activeNotes(), 1);
 
         vm.expectRevert(PrivateVault.NullifierAlreadyUsed.selector);
@@ -228,10 +330,8 @@ contract AquaVaultTest is Test {
 
         _withdraw("note1");
 
-        assertEq(token0.balanceOf(RELAYER), SHARE0 / 100);
-        assertEq(token1.balanceOf(RELAYER), SHARE1 / 100);
-        assertEq(token0.balanceOf(RECIPIENT), SHARE0 - SHARE0 / 100);
-        assertEq(token1.balanceOf(RECIPIENT), SHARE1 - SHARE1 / 100);
+        assertEq(stableA.balanceOf(RELAYER), SHARE / 100);
+        assertEq(stableA.balanceOf(RECIPIENT), SHARE - SHARE / 100);
     }
 
     function test_withdrawCannotBeRedirected() public {
@@ -239,7 +339,7 @@ contract AquaVaultTest is Test {
         (bytes memory proof, bytes32[] memory inputs) = _loadProof("note0");
         vm.expectRevert();
         vault.withdraw(proof, inputs[0], inputs[1], address(0xBAD), address(0), 0);
-        assertEq(token0.balanceOf(address(0xBAD)), 0);
+        assertEq(stableA.balanceOf(address(0xBAD)), 0);
     }
 
     function test_withdrawRejectsUnknownRoot() public {
@@ -261,123 +361,264 @@ contract AquaVaultTest is Test {
     function test_swapFeesRaiseWhatANoteIsWorth() public {
         _deposit(commitment0);
         _deposit(commitment1);
-        XYCSwap.Strategy memory strategy = _shipStrategy(2 * SHARE0, 2 * SHARE1);
+        ISwapVM.Order memory order = _shipVolatile(2 * SHARE, DECAY, FEE_BPS);
 
-        taker.swap(app, strategy, true, 200e18);
-        taker.swap(app, strategy, false, 400e18);
+        _roundTripVolatile(order, 200e18);
 
         uint256[] memory quote = vault.withdrawQuote();
-        assertGt(quote[0] * quote[1], SHARE0 * SHARE1, "share value should grow");
+        assertGt(quote[0] + quote[2], 2 * SHARE, "share value should grow");
 
         _withdraw("note0");
-        assertEq(token0.balanceOf(RECIPIENT), quote[0]);
-        assertEq(token1.balanceOf(RECIPIENT), quote[1]);
+        assertEq(stableA.balanceOf(RECIPIENT), quote[0]);
+        assertEq(volatileToken.balanceOf(RECIPIENT), quote[2]);
     }
 
     function test_lateDepositorDoesNotTakeEarlierYield() public {
         _deposit(commitment0);
-        XYCSwap.Strategy memory strategy = _shipStrategy(SHARE0, SHARE1);
-        taker.swap(app, strategy, true, 100e18);
-        taker.swap(app, strategy, false, 200e18);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        _roundTripVolatile(order, 100e18);
 
         uint256[] memory pricePaid = vault.depositQuote();
         _deposit(commitment1);
 
         uint256[] memory quote = vault.withdrawQuote();
-        assertGe(pricePaid[0], quote[0]);
-        assertGe(pricePaid[1], quote[1]);
-        assertApproxEqAbs(pricePaid[0], quote[0], 1);
-        assertApproxEqAbs(pricePaid[1], quote[1], 1);
+        for (uint256 i = 0; i < quote.length; i++) {
+            assertGe(pricePaid[i], quote[i]);
+            assertApproxEqAbs(pricePaid[i], quote[i], 1);
+        }
     }
 
-    function test_noteStaysWithdrawableAfterSwapsEmptyOneSide() public {
+    // Two strategies, one balance
+
+    function test_oneBalanceBacksTwoStrategiesAndEarnsInBoth() public {
         _deposit(commitment0);
-        XYCSwap.Strategy memory strategy = _shipStrategy(SHARE0, SHARE1);
-        taker.swap(app, strategy, true, 100_000e18);
+        ISwapVM.Order memory volatilePair = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        ISwapVM.Order memory peggedPair = _shipPegged(SHARE);
 
-        _withdraw("note0");
+        (uint248 backingVolatile, ) = aqua.rawBalances(
+            address(vault), address(router), keccak256(abi.encode(volatilePair)), address(stableA)
+        );
+        (uint248 backingPegged, ) = aqua.rawBalances(
+            address(vault), address(router), keccak256(abi.encode(peggedPair)), address(stableA)
+        );
+        assertEq(uint256(backingVolatile) + backingPegged, 2 * stableA.balanceOf(address(vault)));
 
-        assertEq(token0.balanceOf(address(vault)), 0);
-        assertEq(token1.balanceOf(address(vault)), 0);
-        assertGt(token0.balanceOf(RECIPIENT), SHARE0);
+        uint256 valueBefore = _totalValue();
+        _roundTripVolatile(volatilePair, 50e18);
+        uint256 afterVolatile = _totalValue();
+        assertGt(afterVolatile, valueBefore, "volatile strategy should earn");
+
+        uint256 out = taker.swap(peggedPair, address(stableA), address(stableB), 50e18, true);
+        taker.swap(peggedPair, address(stableB), address(stableA), out, true);
+        assertGt(_totalValue(), afterVolatile, "pegged strategy should earn");
+    }
+
+    function _totalValue() internal view returns (uint256) {
+        return stableA.balanceOf(address(vault)) + stableB.balanceOf(address(vault))
+            + volatileToken.balanceOf(address(vault));
+    }
+
+    function test_concentrationTightensThePrice() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, 0);
+        uint256 out = taker.swap(order, address(stableA), address(volatileToken), 50e18, true);
+        // A plain x*y=k pool with this balance would pay 47.6 for 50.
+        assertGt(out, 49e18);
+    }
+
+    function test_quoteMatchesSwap() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        bytes memory takerData = TakerTraitsLib.build(TakerTraitsLib.Args({
+            taker: address(taker),
+            isExactIn: true,
+            shouldUnwrapWeth: false,
+            isStrictThresholdAmount: false,
+            isFirstTransferFromTaker: true,
+            useTransferFromAndAquaPush: true,
+            threshold: "",
+            to: address(0),
+            deadline: 0,
+            hasPreTransferInCallback: false,
+            hasPreTransferOutCallback: false,
+            preTransferInHookData: "",
+            postTransferInHookData: "",
+            preTransferOutHookData: "",
+            postTransferOutHookData: "",
+            preTransferInCallbackData: "",
+            preTransferOutCallbackData: "",
+            instructionsArgs: "",
+            signature: ""
+        }));
+        vm.prank(address(taker));
+        (, uint256 quoted, ) = router.quote(order, address(stableA), address(volatileToken), 50e18, takerData);
+        uint256 out = taker.swap(order, address(stableA), address(volatileToken), 50e18, true);
+        assertEq(out, quoted);
+    }
+
+    // Sandwich resistance
+
+    function test_decayTurnsAProfitableSandwichIntoALoss() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory plain = _shipVolatile(SHARE, 0, 1);
+        ISwapVM.Order memory protected = _shipVolatile(SHARE, DECAY, 1);
+
+        int256 profitPlain = _sandwich(plain);
+        int256 profitProtected = _sandwich(protected);
+
+        console.log("sandwich profit without decay (1e18 = 1 token):");
+        console.logInt(profitPlain);
+        console.log("sandwich profit with decay:");
+        console.logInt(profitProtected);
+        assertGt(profitPlain, 0);
+        assertLt(profitProtected, 0);
     }
 
     // Swap in flight
 
-    function test_cannotDepositInsideASwapCallback() public {
+    function test_cannotDepositWhileTakerOwesTokensIn() public {
         _deposit(commitment0);
-        XYCSwap.Strategy memory strategy = _shipStrategy(SHARE0, SHARE1);
-
-        taker.setDepositDuringSwap(commitment1);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        taker.attackWithDeposit(commitment1);
         vm.expectRevert(AquaVault.SwapInFlight.selector);
-        taker.swap(app, strategy, true, 500e18);
+        taker.swap(order, address(stableA), address(volatileToken), 500e18, false);
     }
 
-    function test_lockClearsAfterSwap() public {
+    function test_cannotDepositBeforeTokensOutLeave() public {
         _deposit(commitment0);
-        XYCSwap.Strategy memory strategy = _shipStrategy(SHARE0, SHARE1);
-        taker.swap(app, strategy, true, 100e18);
-        assertFalse(app.isSwapping(address(vault), keccak256(abi.encode(strategy))));
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        taker.attackWithDeposit(commitment1);
+        vm.expectRevert(AquaVault.SwapInFlight.selector);
+        taker.swap(order, address(stableA), address(volatileToken), 500e18, true);
+    }
+
+    function test_cannotWithdrawInsideASwap() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        (bytes memory proof, bytes32[] memory inputs) = _loadProof("note0");
+        taker.attackWithWithdraw(proof, inputs);
+        vm.expectRevert(AquaVault.SwapInFlight.selector);
+        taker.swap(order, address(stableA), address(volatileToken), 500e18, true);
+    }
+
+    function test_guardClearsAfterASwap() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        taker.swap(order, address(stableA), address(volatileToken), 100e18, true);
         _deposit(commitment1);
+        assertEq(vault.activeNotes(), 2);
+    }
+
+    function test_hooksOnlyRespondToTheRouterRunningAnActiveStrategy() public {
+        _deposit(commitment0);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        bytes32 active = keccak256(abi.encode(order));
+
+        vm.expectRevert(AquaVault.NotFromActiveStrategy.selector);
+        vault.postTransferIn(address(vault), address(0), address(0), address(0), 0, 0, active, "", "");
+
+        vm.startPrank(address(router));
+        vm.expectRevert(AquaVault.NotFromActiveStrategy.selector);
+        vault.postTransferOut(address(this), address(0), address(0), address(0), 0, 0, active, "", "");
+        vm.expectRevert(AquaVault.NotFromActiveStrategy.selector);
+        vault.postTransferOut(address(vault), address(0), address(0), address(0), 0, 0, bytes32(uint256(1)), "", "");
+        vm.stopPrank();
     }
 
     // Strategy control
 
-    function _proposeDefault() internal returns (bytes memory encoded, uint256[] memory amounts, bytes32 id) {
-        XYCSwap.Strategy memory strategy =
-            XYCSwap.Strategy(address(vault), address(token0), address(token1), FEE_BPS, bytes32(0));
-        encoded = abi.encode(strategy);
+    function _defaultProposal()
+        internal
+        view
+        returns (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts)
+    {
+        order = programs.order(address(vault), programs.volatilePair(0.8e18, 1.25e18, DECAY, FEE_BPS, 99));
+        tokens = new address[](2);
+        tokens[0] = address(stableA);
+        tokens[1] = address(volatileToken);
         amounts = new uint256[](2);
-        amounts[0] = SHARE0;
-        amounts[1] = SHARE1;
-        id = vault.proposeStrategy(app, encoded, pair, amounts);
+        amounts[0] = SHARE;
+        amounts[1] = SHARE;
     }
 
     function test_strategyCannotShipBeforeDelay() public {
-        (bytes memory encoded, uint256[] memory amounts, ) = _proposeDefault();
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        vault.proposeStrategy(order, tokens, amounts);
         vm.expectRevert(abi.encodeWithSelector(AquaVault.StrategyDelayPending.selector, block.timestamp + DELAY));
-        vault.ship(app, encoded, pair, amounts);
+        vault.ship(order, tokens, amounts);
     }
 
     function test_cannotShipWhatWasNotProposed() public {
-        (bytes memory encoded, uint256[] memory amounts, ) = _proposeDefault();
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        vault.proposeStrategy(order, tokens, amounts);
         skip(DELAY);
         amounts[0] = amounts[0] * 2;
         vm.expectRevert(AquaVault.NotProposed.selector);
-        vault.ship(app, encoded, pair, amounts);
+        vault.ship(order, tokens, amounts);
     }
 
     function test_cancelledStrategyCannotShip() public {
-        (bytes memory encoded, uint256[] memory amounts, bytes32 id) = _proposeDefault();
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        bytes32 id = vault.proposeStrategy(order, tokens, amounts);
         vault.cancelStrategy(id);
         skip(DELAY);
         vm.expectRevert(AquaVault.NotProposed.selector);
-        vault.ship(app, encoded, pair, amounts);
+        vault.ship(order, tokens, amounts);
+    }
+
+    function test_rejectsStrategyWithoutTheHooks() public {
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        order.traits = MakerTraits.wrap(
+            MakerTraits.unwrap(order.traits) & ~MakerTraitsLib.HAS_POST_TRANSFER_OUT_HOOK_BIT_FLAG
+        );
+        vm.expectRevert(AquaVault.InvalidStrategy.selector);
+        vault.proposeStrategy(order, tokens, amounts);
+    }
+
+    function test_rejectsStrategyWhoseHooksPointElsewhere() public {
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        order.traits = MakerTraits.wrap(
+            MakerTraits.unwrap(order.traits) | MakerTraitsLib.PRE_TRANSFER_IN_HOOK_HAS_TARGET
+        );
+        vm.expectRevert(AquaVault.InvalidStrategy.selector);
+        vault.proposeStrategy(order, tokens, amounts);
+    }
+
+    function test_rejectsStrategyForAnotherMaker() public {
+        (, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        ISwapVM.Order memory order = programs.order(address(this), programs.peggedPair(SHARE, SHARE, 0.8e27, 1, 1));
+        vm.expectRevert(AquaVault.InvalidStrategy.selector);
+        vault.proposeStrategy(order, tokens, amounts);
     }
 
     function test_strategyFunctionsAreOwnerOnly() public {
-        (bytes memory encoded, uint256[] memory amounts, ) = _proposeDefault();
+        (ISwapVM.Order memory order, address[] memory tokens, uint256[] memory amounts) = _defaultProposal();
+        vault.proposeStrategy(order, tokens, amounts);
         vm.startPrank(lp);
         vm.expectRevert();
-        vault.proposeStrategy(app, encoded, pair, amounts);
+        vault.proposeStrategy(order, tokens, amounts);
         vm.expectRevert();
-        vault.ship(app, encoded, pair, amounts);
+        vault.ship(order, tokens, amounts);
         vm.expectRevert();
-        vault.dock(app, keccak256(encoded), pair);
+        vault.dock(keccak256(abi.encode(order)), tokens);
         vm.stopPrank();
     }
 
-    function test_dockRemovesStrategy() public {
+    function test_dockClosesStrategy() public {
         _deposit(commitment0);
-        XYCSwap.Strategy memory strategy = _shipStrategy(SHARE0, SHARE1);
-        bytes32 strategyHash = keccak256(abi.encode(strategy));
-        assertEq(vault.activeStrategies().length, 1);
+        ISwapVM.Order memory order = _shipVolatile(SHARE, DECAY, FEE_BPS);
+        bytes32 strategyHash = keccak256(abi.encode(order));
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(stableA);
+        tokens[1] = address(volatileToken);
 
-        vault.dock(app, strategyHash, pair);
+        vault.dock(strategyHash, tokens);
 
-        assertEq(vault.activeStrategies().length, 0);
+        assertFalse(vault.isActiveStrategy(strategyHash));
         vm.expectRevert(AquaVault.StrategyNotActive.selector);
-        vault.dock(app, strategyHash, pair);
+        vault.dock(strategyHash, tokens);
+        vm.expectRevert();
+        taker.swap(order, address(stableA), address(volatileToken), 1e18, true);
     }
 
     function test_gasReport() public {
